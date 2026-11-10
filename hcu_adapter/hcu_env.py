@@ -122,6 +122,16 @@ def _auto_mqa_emu():
 
 
 REGISTRY = {
+    "HCU_VLLM_FP4_INDEXER_IMPL": {
+        "env": "HCU_VLLM_FP4_INDEXER_IMPL", "default": "stock",
+        "hosts": ("vllm",),
+        "about": "V41 zero-copy FP4 indexer: stock/lightop; before-allocation admission; fresh-process rollback",
+    },
+    "HCU_VLLM_FP4_PACKER_IMPL": {
+        "env": "HCU_VLLM_FP4_PACKER_IMPL", "default": "stock",
+        "hosts": ("vllm",),
+        "about": "Plugin-owned E2M1 lowering: stock or triton; startup only; kill vllm_fp4_packer wins",
+    },
     "HCU_VLLM_SPARSE_INDEXER_IMPL": {
         "env": "HCU_VLLM_SPARSE_INDEXER_IMPL", "default": "stock",
         "hosts": ("vllm",),
