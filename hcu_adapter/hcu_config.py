@@ -91,10 +91,10 @@ BACKEND_CATALOG = {
     },
     "vllm_fp4_indexer": {
         "var": "HCU_VLLM_FP4_INDEXER_IMPL",
-        "summary": "V41 LightOp FP4 indexer with zero-copy 64-record cache pages",
+        "summary": "V41 LightOp FP4 indexer with variable allocator pages",
         "backends": {
             "stock": {"status": "candidate", "note": "Explicit stock fallback: existing FP8 behavior"},
-            "lightop": {"status": "candidate", "note": "Default: eager or PIECEWISE breakable Graph; logical 64-record pages, ratio2 physical 32 records staged for decode; mixed ratios and model acceptance pending"},
+            "lightop": {"status": "candidate", "note": "PCP1 eager/PIECEWISE; constrained eager PCP8 TP1/DP1/EP/HT without speculation; variable-page decode staging, bounded query scores and transient profile budget; PCP8 Channel-FP8 32K requests completed and HumanEval164 scored 161/164 on 2026-11-11"},
         },
     },
     "vllm_fp4_packer": {
