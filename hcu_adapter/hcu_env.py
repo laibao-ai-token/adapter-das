@@ -317,6 +317,21 @@ REGISTRY = {
                  "关融合不是绕法（mapper 后的组 targets 只认融合名）；"
                  "=0 跳过安装。",
     },
+    "HCU_LIGHTOP_PER_TOKEN_INT8": {
+        "env": "HCU_LIGHTOP_PER_TOKEN_INT8", "default": "0",
+        "about": "vLLM 0.33 动态 per-token INT8 激活量化改走 LightOp "
+                 "per_token_dynamic_quant_int8（原生 op，直接写 [M,1] scale；"
+                 "绑定 vllm._custom_ops.scaled_int8_quant，树内调用点全是 "
+                 "ops. 模块属性访问，一处覆盖）。仅当 scale/azp 为 None、"
+                 "symmetric、2D 连续、16 字节对齐、bf16 且 hidden%16==0、"
+                 "0<hidden<=8192 时命中；其余契约与任何 LightOp 异常一律回退"
+                 "上游原函数。数值与上游 bit-identical（scale 相等、q 逐元素"
+                 "无差、零行 scale 两边都是 0），所以不设诊断开关。"
+                 "注意别用 lightop.quant.per_token_quant_int8：那条 native "
+                 "快路只覆盖 K==128，其余宽度落 Triton 且慢 2.7~2.95×。"
+                 "默认 0 = 关闭（opt-in，未做服务 A/B 前不默认生效）；"
+                 "=1 开启。",
+    },
     "HCU_FLASHMLA_SPARSE_CHUNK_MB": {
         "env": "HCU_FLASHMLA_SPARSE_CHUNK_MB", "default": "512",
         "about": "sparse FlashMLA emu（sgl_kernel/flash_mla_sparse.py）按 s_q "

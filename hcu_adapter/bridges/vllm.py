@@ -507,6 +507,11 @@ def hcu_runtime_plugin() -> None:
         from hcu_adapter.bridges.vllm_scaled_mm import install as install_scaled_mm
 
         install_scaled_mm()
+        from hcu_adapter.bridges.vllm_input_quant_int8_lightop import (
+            install as install_input_quant_int8_lightop,
+        )
+
+        install_input_quant_int8_lightop()
         from hcu_adapter.bridges.vllm_allreduce import prepare_runtime
 
         prepare_runtime()
