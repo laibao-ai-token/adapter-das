@@ -317,6 +317,20 @@ REGISTRY = {
                  "关融合不是绕法（mapper 后的组 targets 只认融合名）；"
                  "=0 跳过安装。",
     },
+    "HCU_LIGHTOP_PER_TOKEN_FP8": {
+        "env": "HCU_LIGHTOP_PER_TOKEN_FP8", "default": "1",
+        "about": "vLLM 0.33 动态 per-token FP8 激活量化改走 LightOp "
+                 "per_token_quant_fp8（绑定 QuantFP8.forward_cuda，"
+                 "forward_hip 的 fallback 也经此）。仅当 scale/scale_ub 为 "
+                 "None、PER_TOKEN、无 token padding、2D 连续 bf16 时命中；"
+                 "其余契约与任何 LightOp 异常一律回退上游原方法。"
+                 "零行 scale 上游取下界 1/(448*512)、LightOp 给 0（两者反量化"
+                 "结果都是 0）；amax 低于下界的行 scale 语义不同。"
+                 "默认 1 = 开启（用户 2026-11-17 决定翻默认）；=0 关闭。"
+                 "注：这条会改数值（正常行约 0.06% 元素差 1 ulp；"
+                 "amax 低于 clamp 下界的行 scale 语义不同），"
+                 "验收未通过时用 =0 回到上游实现。",
+    },
     "HCU_LIGHTOP_PER_TOKEN_INT8": {
         "env": "HCU_LIGHTOP_PER_TOKEN_INT8", "default": "0",
         "about": "vLLM 0.33 动态 per-token INT8 激活量化改走 LightOp "
@@ -331,6 +345,13 @@ REGISTRY = {
                  "快路只覆盖 K==128，其余宽度落 Triton 且慢 2.7~2.95×。"
                  "默认 0 = 关闭（opt-in，未做服务 A/B 前不默认生效）；"
                  "=1 开启。",
+    },
+    "HCU_LIGHTOP_FP8_AMAX_DIAG": {
+        "env": "HCU_LIGHTOP_FP8_AMAX_DIAG", "default": "0",
+        "about": "诊断开关（默认关，仅验证轮开启）：统计每次调用的行数里 "
+                 "amax < 1/(448*512)（上游 clamp 下界）的行数与占比，"
+                 "log-once 输出。默认关是因为每次调用多一次 reduction；"
+                 "不要在生产路径打开。",
     },
     "HCU_FLASHMLA_SPARSE_CHUNK_MB": {
         "env": "HCU_FLASHMLA_SPARSE_CHUNK_MB", "default": "512",
