@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import torch
 
+from ..hcu_env import enabled
+
 
 SUPPORTED_ARCHES = frozenset({'gfx936', 'gfx938'})
 
@@ -47,7 +49,23 @@ def _selectors_supported(dense, lengths, flat, indptr, q):
             and lengths.dtype == torch.int32 and lengths.device == q.device)
 
 
+# Bound per-row work and retain the existing implementation for larger widths.
+# This selects an implementation only; _selectors_supported is unchanged.
+_SELECTORS_FUSED_MAX_WIDTH = 4096
+_FUSED_SELECTORS_ENV = "HCU_TRITON_FUSED_SELECTORS"
+
+
 def _selectors(dense, lengths, flat, indptr, rows, num_slots):
+    source = flat if flat is not None else dense
+    if (source.is_cuda and source.numel() // rows <= _SELECTORS_FUSED_MAX_WIDTH
+            and enabled(_FUSED_SELECTORS_ENV)):
+        from .mla_selectors_triton import selectors
+
+        return selectors(dense, lengths, flat, indptr, rows, num_slots)
+    return _selectors_eager(dense, lengths, flat, indptr, rows, num_slots)
+
+
+def _selectors_eager(dense, lengths, flat, indptr, rows, num_slots):
     """CSR to padded dense, then compact invalid slots before vendor lengths.
 
     Never read indptr[-1] or any dynamic length on the host. Keep duplicate

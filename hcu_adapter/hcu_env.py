@@ -626,6 +626,18 @@ REGISTRY = {
                  " 全错；同时补 mk-alignment get/set API）；=0 退回 DTK 原核"
                  "（会崩）作对照",
     },
+    "HCU_TRITON_FUSED_SELECTORS": {
+        "env": "HCU_TRITON_FUSED_SELECTORS", "default": "0",
+        "about": "vLLM native MLA sparse decode 的 selector 候选。=1 在有界 HCU "
+                 "shape 上用单内核过滤、升序排序、写 padded ids/counts；"
+                 "超融合预算回退三步 Triton。=0 使用 Base eager selector。",
+    },
+    "HCU_TRITON_FAST_LAUNCH": {
+        "env": "HCU_TRITON_FAST_LAUNCH", "default": "0",
+        "about": "MLA Triton selector 的可选 CompiledKernel launch replay。"
+                 "=0 使用 Triton 通用 JIT 派发（候选评测配置）。"
+                 "只影响已启用的 Triton 路径，不改变 selector 分流。",
+    },
     "HCU_TRITON_MASKED": {
         "env": "HCU_TRITON_MASKED", "default": "1",
         "about": "既有 DeepGEMM BF16 masked 路由开关：使用 adapter Triton"
