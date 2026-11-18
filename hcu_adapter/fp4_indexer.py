@@ -48,16 +48,15 @@ def applicable(cfg):
 
 
 def _graph_capture_allowed(cfg):
-    """Admit the capture mode through the adapter-owned graph contract.
+    """Admit FP4 FULL capture independently of the FP8 reference policy.
 
-    ``graph_capture_allowed`` is a vLLM ``CompilationConfig`` rule (breakable
-    PIECEWISE admitted, full cudagraph rejected), not plugin mechanism, so it
-    lives in ``hcu_adapter.v41_fp8_indexer``. That module hands back the
-    predicate this process admits by: an activated plugin binds a zero-argument
-    hook that reads its historical module object, so a patch there still reaches
-    this check. The import is lazy so this admission module stays importable
-    before the plugin activates and in adapter-only CPU tests.
+    FP4 keeps its own model/cache checks below. Piecewise capture continues to
+    use the adapter-owned break contract and the plugin's live patch point.
     """
+    compilation = getattr(cfg, 'compilation_config', None)
+    mode = getattr(compilation, 'cudagraph_mode', None)
+    if mode is not None and mode.has_full_cudagraphs():
+        return True
     from hcu_adapter.v41_fp8_indexer import resolve_graph_capture_allowed
     return bool(resolve_graph_capture_allowed()(cfg))
 
@@ -108,8 +107,7 @@ def validate_config(cfg):
         errors.append('LoRA unsupported')
     if not cfg.use_v2_model_runner or not (
             cfg.model_config.enforce_eager or _graph_capture_allowed(cfg)):
-        errors.append('eager MRV2 or PIECEWISE breakable Graph required; '
-                      'full cudagraph is not admitted')
+        errors.append('MRV2 with eager, FULL Graph, or PIECEWISE breakable Graph required')
     # JIT warmup is NOT rejected here: `register_warmup()` only queues a compile
     # key with `JitWarmupRegistry`, so the owner kernels are still unhashed when
     # the packer rebinds them during model construction. The plugin's

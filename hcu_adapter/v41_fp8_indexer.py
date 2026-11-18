@@ -115,9 +115,12 @@ def register_splitting_op(config) -> bool:
 def graph_capture_allowed(config) -> bool:
     """Return whether a non-eager reference indexer has a capture break.
 
-    Full cudagraphs are intentionally rejected: they are monolithic capture
-    contexts, so a host-metadata custom op cannot be broken out of the replay.
-    Use PIECEWISE (or the breakable piecewise wrapper) for this reference.
+    FULL capture is admitted only through the breakable wrapper: the op is
+    decorated with ``eager_break_during_capture``, so the wrapper ends the
+    current graph segment, runs the host-metadata work eagerly on the capture
+    stream, records it for replay and resumes a fresh segment. Without that
+    wrapper a FULL capture is monolithic and cannot be broken out of the
+    replay, so monolithic FULL stays rejected.
     """
     from vllm.compilation.breakable_cudagraph import (
         is_breakable_cudagraph_enabled,
@@ -129,7 +132,7 @@ def graph_capture_allowed(config) -> bool:
         cudagraph_mode is not None
         and cudagraph_mode.has_full_cudagraphs()
     ):
-        return False
+        return bool(is_breakable_cudagraph_enabled())
     if is_breakable_cudagraph_enabled():
         return True
     if compilation is None:
@@ -556,9 +559,10 @@ def build():
                     if not cfg.model_config.enforce_eager and not _resolve(
                             "graph_allowed")(cfg):
                         raise ValueError(
-                            "V41 reference indexer requires eager execution or a "
-                            "PIECEWISE breakable/inductor-split graph capture; "
-                            "full cudagraph cannot break out the host-metadata op")
+                            "V41 reference indexer requires eager execution, a "
+                            "PIECEWISE breakable/inductor-split graph capture, or a "
+                            "FULL capture under the breakable wrapper "
+                            "(VLLM_USE_BREAKABLE_CUDAGRAPH=1)")
                     if (p.prefill_context_parallel_size != 1
                             or p.decode_context_parallel_size != 1):
                         raise ValueError(
