@@ -107,8 +107,9 @@ def try_decode(*, q, kv_cache, swa_k_cache, swa_only, topk_indices, topk_lens,
 
     BF16 output owes the caller its inverse-RoPE (return 0). MXFP8 delegates
     inverse-RoPE/quantization to the original core epilogue (return every row).
-    A fresh native plan per invocation prevents stale lengths across layers,
-    warmup/capture and forwards; core metadata/schedulers are not modified.
+    A fresh plan per invocation prevents stale lengths across layers, warmup,
+    capture and forwards. Supported native descriptors are recomputed from
+    current counts; other contracts retain the native generator.
     """
     if ((head_dim, nope_head_dim, rope_head_dim) != (512, 448, 64)
             or q.ndim != 3 or not 0 < q.shape[1] <= 128 or q.shape[0] == 0
@@ -157,9 +158,14 @@ def try_decode(*, q, kv_cache, swa_k_cache, swa_only, topk_indices, topk_lens,
     native_heads = 64 if heads <= 64 else 128
     from .mla_decode_io import native_query_and_sink, try_mask_copy
     queries, sink = native_query_and_sink(q, attn_sink, native_heads)
+    from .mla_native_plan import prepare_native_plan
+    metadata = prepare_native_plan(main_lens, extra_lens, native_heads,
+        main_ids.shape[-1], 0 if extra_ids is None else extra_ids.shape[-1],
+        provider, metadata_factory,
+        (swa_k_cache.shape[1], 0 if swa_only else kv_cache.shape[1]))
     result, _ = provider(q=queries, k_cache=swa_k_cache.unsqueeze(-2),
         block_table=None, cache_seqlens=None, head_dim_v=512,
-        tile_scheduler_metadata=metadata_factory()[0], softmax_scale=scale,
+        tile_scheduler_metadata=metadata, softmax_scale=scale,
         causal=False, is_fp8_kvcache=True, indices=main_ids,
         topk_length=main_lens, attn_sink=sink,
         extra_k_cache=None if swa_only else kv_cache.unsqueeze(-2),
