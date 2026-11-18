@@ -155,12 +155,8 @@ def try_decode(*, q, kv_cache, swa_k_cache, swa_only, topk_indices, topk_lens,
     # DTK D512 native decode consumes H64/H128. Pad queries/sinks only, so TP
     # slices (H4/H8/H16/...) use the same packed cache without any KV gather.
     native_heads = 64 if heads <= 64 else 128
-    queries = torch.zeros((rows, 1, native_heads, 512), dtype=q.dtype, device=q.device)
-    queries[:, 0, :heads].copy_(q)
-    sink = None
-    if attn_sink is not None:
-        sink = torch.full((native_heads,), -torch.inf, dtype=torch.float32, device=q.device)
-        sink[:heads].copy_(attn_sink[:heads])
+    from .mla_decode_io import native_query_and_sink, try_mask_copy
+    queries, sink = native_query_and_sink(q, attn_sink, native_heads)
     result, _ = provider(q=queries, k_cache=swa_k_cache.unsqueeze(-2),
         block_table=None, cache_seqlens=None, head_dim_v=512,
         tile_scheduler_metadata=metadata_factory()[0], softmax_scale=scale,
@@ -169,6 +165,8 @@ def try_decode(*, q, kv_cache, swa_k_cache, swa_only, topk_indices, topk_lens,
         extra_k_cache=None if swa_only else kv_cache.unsqueeze(-2),
         extra_indices_in_kvcache=extra_ids, extra_topk_length=extra_lens)
     result = result[:, 0, :heads]
+    if output_mxfp8 is None and try_mask_copy(result, output, main_lens, extra_lens):
+        return 0
     nonempty = main_lens > 0 if swa_only else main_lens + extra_lens > 0
     result = torch.where(nonempty[:, None, None], result, 0.)
     if output_mxfp8 is not None:
