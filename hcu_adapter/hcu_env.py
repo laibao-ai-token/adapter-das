@@ -181,6 +181,11 @@ REGISTRY = {
         "hosts": ("vllm",),
         "about": "vLLM 0.33/gfx936,gfx938 mHC: aiter (default), torch or stock; stock remains the opt-out; startup only",
     },
+    "HCU_VLLM_MHC_MEGA": {
+        "env": "HCU_VLLM_MHC_MEGA", "default": "0",
+        "hosts": ("vllm",),
+        "about": "Experimental gfx938/vLLM 0.33 shifted mega_mhc seam inside aiter mode; 0 keeps AITER, 1 opts in; startup only",
+    },
     "HCU_VLLM_MHC_PRE_SPLIT_K": {
         "env": "HCU_VLLM_MHC_PRE_SPLIT_K", "default": "auto",
         "hosts": ("vllm",),

@@ -29,6 +29,7 @@ MODE_VARIABLE = 'HCU_VLLM_MHC_IMPL'
 COMPILE_FACTOR = 'VLLM_HCU_ADAPTER_MHC_IMPLEMENTATION'
 SPLIT_VARIABLE = 'HCU_VLLM_MHC_PRE_SPLIT_K'
 DELAYED_FUSION_VARIABLE = 'HCU_VLLM_MHC_DELAYED_FUSION'
+MEGA_VARIABLE = 'HCU_VLLM_MHC_MEGA'
 VALIDATED_ARCHES = frozenset({'gfx936', 'gfx938'})
 
 
@@ -53,6 +54,7 @@ class _Publication:
     split_k: str
     delayed_fusion_requested: bool
     provider: object = None
+    mega_provider: object = None
 
 
 def selected_mode() -> str:
@@ -93,6 +95,15 @@ def selected_delayed_fusion(mode):
     return value == '1'
 
 
+def selected_mega():
+    if op_disabled('vllm_mhc'):
+        return False
+    value, _ = hcu_env.resolve(MEGA_VARIABLE, host='vllm')
+    if value not in ('0', '1'):
+        raise ValueError(f'{MEGA_VARIABLE} must be 0 or 1')
+    return value == '1'
+
+
 def _refuse(reason, error=None):
     global _failure
     # Publish before invoking exception formatting, including fork/reentry.
@@ -110,8 +121,12 @@ def _check_publication(p):
     if (selected_mode() != p.mode or selected_split_k(p.mode) != p.split_k
             or selected_delayed_fusion(p.mode) != p.delayed_fusion_requested):
         _refuse('mHC startup policy changed after registration; start a fresh process')
+    if selected_mega() != (p.mega_provider is not None):
+        _refuse('mHC mega startup policy changed after registration; start a fresh process')
     if p.provider is not None:
         p.provider.require_healthy()
+    if p.mega_provider is not None:
+        p.mega_provider.require_healthy()
     for original, replacement in zip(p.originals, p.replacements):
         # Execute the public allocation/selection step without __init__, which
         # needs a current VllmConfig. No private OOT registry access is needed.
@@ -128,7 +143,7 @@ def require_healthy() -> None:
         raise MhcCompatibilityError(_failure)
     p = _publication
     if p is None:
-        if selected_mode() in ('torch', 'aiter'):
+        if selected_mode() in ('torch', 'aiter') or selected_mega():
             raise MhcCompatibilityError('mHC compatibility requested before runtime activation')
         return
     if p.pid != os.getpid():
@@ -205,7 +220,7 @@ def _declare(mhc, kernels, ir):
 
 
 
-def _declare_aiter(mhc, kernels, ir, backend, provider, split_k):
+def _declare_aiter(mhc, kernels, ir, backend, provider, split_k, mega=None):
     global torch
     torch = import_module('torch')
     runtime = backend.MhcAiterRuntime(provider, kernels, ir.ops.rms_norm,
@@ -289,6 +304,13 @@ def _declare_aiter(mhc, kernels, ir, backend, provider, split_k):
                         x=None, norm_weight=None, norm_eps=1e-6, sublayer_out=None,
                         post_layer_mix=None, comb_res_mix=None):
             require_healthy()
+            if mega is not None and mega.supported(
+                    residual, fn, hc_scale, hc_base, pre_mix, x, norm_weight,
+                    sublayer_out, post_layer_mix, comb_res_mix, sinkhorn_repeat):
+                return torch.ops.vllm.hcu_adapter_mhc_mega_seam(
+                    residual, fn, hc_scale, hc_base, rms_eps, hc_pre_eps,
+                    hc_sinkhorn_eps, hc_post_mult_value, sinkhorn_repeat,
+                    pre_mix, sublayer_out, post_layer_mix, comb_res_mix)
             residual = self._maybe_post(residual,sublayer_out,post_layer_mix,comb_res_mix)
             return residual, *torch.ops.vllm.hcu_adapter_mhc_delayed(residual,fn,hc_scale,hc_base,
                 rms_eps,hc_pre_eps,hc_sinkhorn_eps,hc_post_mult_value,sinkhorn_repeat,
@@ -301,6 +323,27 @@ def _declare_aiter(mhc, kernels, ir, backend, provider, split_k):
     return (((pre, pre_fake, HcuMHCPreOp), (fused, fused_fake, HcuMHCFusedPostPreOp),
              (delayed, delayed_fake, HcuMHCPreDelayedOp), (post, post_fake, HcuMHCPostOp)),
             runtime)
+
+
+def _declare_mega(runtime):
+    def seam(residual: torch.Tensor, fn: torch.Tensor,
+             hc_scale: torch.Tensor, hc_base: torch.Tensor,
+             rms_eps: float, hc_pre_eps: float, hc_sinkhorn_eps: float,
+             hc_post_mult_value: float, sinkhorn_repeat: int,
+             pre_mix: torch.Tensor, sublayer_out: torch.Tensor,
+             post_layer_mix: torch.Tensor, comb_res_mix: torch.Tensor
+             ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        require_healthy()
+        if not runtime.supported(residual, fn, hc_scale, hc_base, pre_mix, None, None,
+                                 sublayer_out, post_layer_mix, comb_res_mix, sinkhorn_repeat):
+            raise MhcCompatibilityError('mHC mega seam called outside its supported contract')
+        try:
+            return runtime.seam(residual, fn, hc_scale, hc_base, rms_eps,
+                hc_pre_eps, hc_sinkhorn_eps, hc_post_mult_value, sinkhorn_repeat,
+                pre_mix, sublayer_out, post_layer_mix, comb_res_mix)
+        except BaseException as error:
+            _refuse('mHC mega seam execution failed; start a fresh process', error)
+    return seam, runtime.seam_meta
 
 
 def _load_aiter_provider():
@@ -330,12 +373,13 @@ def install() -> bool:
     try:
         mode = selected_mode()
         delayed_fusion_requested = selected_delayed_fusion(mode)
+        mega_requested = selected_mega()
     except BaseException as error:
         if _publication is not None:
             _refuse('mHC policy invalid after registration; start a fresh process', error)
         raise
     # Stock stays untouched (pure upstream).
-    if mode == 'stock' and _publication is None:
+    if mode == 'stock' and _publication is None and not mega_requested:
         return False
 
     def initialize():
@@ -353,6 +397,9 @@ def install() -> bool:
             _check_publication(_publication)
             _publication = replace(_publication, pid=os.getpid())
             return
+        aiter_mode = mode == 'aiter'
+        if mega_requested and (not aiter_mode or detected.architecture != 'gfx938'):
+            raise MhcCompatibilityError('mHC mega seam requires aiter mode on gfx938')
         mhc = import_module('vllm.model_executor.layers.mhc')
         kernels = import_module('vllm.model_executor.kernels.mhc.torch')
         ir = import_module('vllm.ir')
@@ -380,7 +427,13 @@ def install() -> bool:
         for attribute in ('_maybe_post',):
             if not callable(getattr(mhc.MHCPreDelayedOp, attribute, None)):
                 raise MhcCompatibilityError(f'official mHC delayed ABI changed: {attribute}')
-        aiter_mode = mode == 'aiter'
+        mega = None
+        mega_provider = None
+        if mega_requested:
+            mega_backend = import_module('hcu_adapter.kernels.mhc_mega')
+            mega_provider = mega_backend.load_provider()
+            mega = mega_backend.MhcMegaRuntime(
+                mega_provider, import_module('torch').ops.vllm.hc_collapse_triton)
         if aiter_mode:
             provider = _load_aiter_provider()
             split_k = selected_split_k(mode)
@@ -397,7 +450,7 @@ def install() -> bool:
         if aiter_mode:
             backend = import_module('hcu_adapter.kernels.mhc_aiter')
             declarations, runtime = _declare_aiter(
-                mhc, kernels, ir, backend, provider, split_k)
+                mhc, kernels, ir, backend, provider, split_k, mega)
             names = ('hcu_adapter_mhc_pre','hcu_adapter_mhc_fused',
                      'hcu_adapter_mhc_delayed','hcu_adapter_mhc_post')
         else:
@@ -405,12 +458,16 @@ def install() -> bool:
             runtime = None
             names = ('hcu_adapter_mhc_pre','hcu_adapter_mhc_fused')
         files = (Path(__file__), Path(inspect.getfile(kernels)), Path(inspect.getfile(rms_ops)))
+        if mega is not None:
+            files += (Path(inspect.getfile(type(mega))),)
         content = dict(sources=[hashlib.sha256(p.read_bytes()).hexdigest() for p in files],
                        torch=torch.__version__, hip=torch.version.hip,
                        mode=mode, split_k=split_k,
                        delayed_fusion_requested=delayed_fusion_requested,
                        delayed_fusion_sources=None,
-                       provider=None if provider is None else provider.fingerprint())
+                       provider=None if provider is None else provider.fingerprint(),
+                       mega_requested=mega_requested,
+                       mega=None if mega_provider is None else mega_provider.fingerprint())
         prefix = 'aiter' if aiter_mode else 'official-torch'
         impl = 'aiter' if aiter_mode and provider.available else 'torch'
         # Every operation below can publish permanent process state. An error,
@@ -419,6 +476,10 @@ def install() -> bool:
             for name, (function, fake, _) in zip(names, declarations):
                 if function is not None:
                     register(name, function, mutates_args=[], fake_impl=fake)
+            if mega is not None:
+                mega_function, mega_fake = _declare_mega(mega)
+                register('hcu_adapter_mhc_mega_seam', mega_function,
+                         mutates_args=[], fake_impl=mega_fake)
             if (delayed_fusion_requested and provider.project is not None
                     and provider.stage2_ready):
                 # Optional op: import/registration failures keep the two launches.
@@ -445,12 +506,13 @@ def install() -> bool:
             envs.environment_variables[COMPILE_FACTOR] = factor_getter
             _publication = _Publication(os.getpid(), owners,
                 tuple(item[2] for item in declarations), envs, factor_getter, factor,
-                mode, split_k, delayed_fusion_requested, provider)
+                mode, split_k, delayed_fusion_requested, provider, mega_provider)
             _check_publication(_publication)
             detail = (f'candidate {detected.architecture}/v0.33 AITER HIP mHC '
                       f'pre/delayed/fused/post via public OOT; split-K={split_k}; '
                       f'TileLang-stage2={provider.tilelang_enabled}; provider={impl}; '
                       f'delayed-fusion={runtime.pre_mix_collapse is not None}; '
+                      f'mega-shifted-seam={mega is not None}; '
                       f'gfx938 W4A8 eager validated; Graph and other models pending'
                       if aiter_mode else
                       f'candidate {detected.architecture}/v0.33 official Torch pre/post and '
