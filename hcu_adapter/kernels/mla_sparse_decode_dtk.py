@@ -165,6 +165,11 @@ def try_decode(*, q, kv_cache, swa_k_cache, swa_only, topk_indices, topk_lens,
         extra_k_cache=None if swa_only else kv_cache.unsqueeze(-2),
         extra_indices_in_kvcache=extra_ids, extra_topk_length=extra_lens)
     result = result[:, 0, :heads]
+    if output_mxfp8 is None:
+        from .mla_decode_rope import try_mask_copy_rope
+        if try_mask_copy_rope(result, output, main_lens, extra_lens,
+                              inv_rope_positions, inv_rope_cos_sin_cache):
+            return rows
     if output_mxfp8 is None and try_mask_copy(result, output, main_lens, extra_lens):
         return 0
     nonempty = main_lens > 0 if swa_only else main_lens + extra_lens > 0
