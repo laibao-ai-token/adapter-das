@@ -354,8 +354,13 @@ class MhcAiterRuntime:
             return torch.empty_like(residual)
         *outer, hc, hidden = residual.shape
         tensors = (x, residual, post_layer_mix, comb_res_mix)
+        if hidden == 5120 and self.provider.post is not None:
+            from .mhc_post_5120 import post_5120, supported as post_supported
+            if post_supported(x, residual, post_layer_mix, comb_res_mix):
+                return post_5120(x, residual, post_layer_mix, comb_res_mix)
+        # Use the Torch boundary for H5120 inputs outside the exact kernel contract.
         supported = (residual.ndim == 3 and hc == 4 and hidden >= 1024
-                     and hidden % 1024 == 0
+                     and hidden != 5120 and hidden % 1024 == 0
                      and x.shape == (*outer, hidden)
                      and post_layer_mix.shape in ((*outer, hc), (*outer, hc, 1))
                      and comb_res_mix.shape == (*outer, hc, hc)

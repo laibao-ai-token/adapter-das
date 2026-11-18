@@ -522,6 +522,9 @@ def install() -> bool:
         files = (Path(__file__), Path(inspect.getfile(kernels)), Path(inspect.getfile(rms_ops)))
         if mega is not None:
             files += (Path(inspect.getfile(type(mega))),)
+        if aiter_mode:
+            source_dir = Path(__file__).parent.parent / 'kernels'
+            files += (source_dir / 'mhc_aiter.py', source_dir / 'mhc_post_5120.py')
         content = dict(sources=[hashlib.sha256(p.read_bytes()).hexdigest() for p in files],
                        torch=torch.__version__, hip=torch.version.hip,
                        mode=mode, split_k=split_k,
