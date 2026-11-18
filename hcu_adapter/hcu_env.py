@@ -186,6 +186,11 @@ REGISTRY = {
         "hosts": ("vllm",),
         "about": "vLLM 0.33 aiter mHC staged delayed Pre split-K: auto or 1/2/4/8/16/32; auto=32 only for hc4/hidden5120/0<tokens<=64; startup only",
     },
+    "HCU_VLLM_MHC_DELAYED_FUSION": {
+        "env": "HCU_VLLM_MHC_DELAYED_FUSION", "default": "0",
+        "hosts": ("vllm",),
+        "about": "Opt in to fused gate/collapse for vLLM 0.33 AITER staged delayed Pre, hc4/hidden5120/1-64 rows; startup only",
+    },
     "VLLM_HCU_USE_AITER_TILELANG_MHC": {
         "env": "VLLM_HCU_USE_AITER_TILELANG_MHC", "default": "1",
         "hosts": ("vllm",),

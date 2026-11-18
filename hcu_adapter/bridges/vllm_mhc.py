@@ -13,6 +13,7 @@ import hashlib
 from importlib import import_module
 import inspect
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -22,9 +23,12 @@ from hcu_adapter import hcu_env, registry
 from hcu_adapter.kill_switch import op_disabled
 from hcu_adapter.runtime_lifecycle import ProcessLocalLifecycle
 
+LOG = logging.getLogger("hcu.adapter")
+
 MODE_VARIABLE = 'HCU_VLLM_MHC_IMPL'
 COMPILE_FACTOR = 'VLLM_HCU_ADAPTER_MHC_IMPLEMENTATION'
 SPLIT_VARIABLE = 'HCU_VLLM_MHC_PRE_SPLIT_K'
+DELAYED_FUSION_VARIABLE = 'HCU_VLLM_MHC_DELAYED_FUSION'
 VALIDATED_ARCHES = frozenset({'gfx936', 'gfx938'})
 
 
@@ -47,6 +51,7 @@ class _Publication:
     factor: str
     mode: str
     split_k: str
+    delayed_fusion_requested: bool
     provider: object = None
 
 
@@ -79,6 +84,15 @@ def selected_split_k(mode):
     return value
 
 
+def selected_delayed_fusion(mode):
+    if mode != 'aiter':
+        return False
+    value, _ = hcu_env.resolve(DELAYED_FUSION_VARIABLE, host='vllm')
+    if value not in ('0', '1'):
+        raise ValueError(f'{DELAYED_FUSION_VARIABLE} must be 0 or 1')
+    return value == '1'
+
+
 def _refuse(reason, error=None):
     global _failure
     # Publish before invoking exception formatting, including fork/reentry.
@@ -93,7 +107,8 @@ def _refuse(reason, error=None):
 
 
 def _check_publication(p):
-    if selected_mode() != p.mode or selected_split_k(p.mode) != p.split_k:
+    if (selected_mode() != p.mode or selected_split_k(p.mode) != p.split_k
+            or selected_delayed_fusion(p.mode) != p.delayed_fusion_requested):
         _refuse('mHC startup policy changed after registration; start a fresh process')
     if p.provider is not None:
         p.provider.require_healthy()
@@ -283,8 +298,9 @@ def _declare_aiter(mhc, kernels, ir, backend, provider, split_k):
         def forward_hip(self, x, residual, post_layer_mix, comb_res_mix):
             return torch.ops.vllm.hcu_adapter_mhc_post(x,residual,post_layer_mix,comb_res_mix)
 
-    return ((pre, pre_fake, HcuMHCPreOp), (fused, fused_fake, HcuMHCFusedPostPreOp),
-            (delayed, delayed_fake, HcuMHCPreDelayedOp), (post, post_fake, HcuMHCPostOp))
+    return (((pre, pre_fake, HcuMHCPreOp), (fused, fused_fake, HcuMHCFusedPostPreOp),
+             (delayed, delayed_fake, HcuMHCPreDelayedOp), (post, post_fake, HcuMHCPostOp)),
+            runtime)
 
 
 def _load_aiter_provider():
@@ -313,6 +329,7 @@ def install() -> bool:
         raise MhcCompatibilityError(_failure)
     try:
         mode = selected_mode()
+        delayed_fusion_requested = selected_delayed_fusion(mode)
     except BaseException as error:
         if _publication is not None:
             _refuse('mHC policy invalid after registration; start a fresh process', error)
@@ -379,21 +396,22 @@ def install() -> bool:
             raise MhcCompatibilityError('mHC compilation factor already has another owner')
         if aiter_mode:
             backend = import_module('hcu_adapter.kernels.mhc_aiter')
-            declarations = _declare_aiter(mhc, kernels, ir, backend, provider, split_k)
+            declarations, runtime = _declare_aiter(
+                mhc, kernels, ir, backend, provider, split_k)
             names = ('hcu_adapter_mhc_pre','hcu_adapter_mhc_fused',
                      'hcu_adapter_mhc_delayed','hcu_adapter_mhc_post')
         else:
             declarations = _declare(mhc, kernels, ir)
+            runtime = None
             names = ('hcu_adapter_mhc_pre','hcu_adapter_mhc_fused')
         files = (Path(__file__), Path(inspect.getfile(kernels)), Path(inspect.getfile(rms_ops)))
         content = dict(sources=[hashlib.sha256(p.read_bytes()).hexdigest() for p in files],
                        torch=torch.__version__, hip=torch.version.hip,
                        mode=mode, split_k=split_k,
+                       delayed_fusion_requested=delayed_fusion_requested,
+                       delayed_fusion_sources=None,
                        provider=None if provider is None else provider.fingerprint())
         prefix = 'aiter' if aiter_mode else 'official-torch'
-        factor = prefix + ':' + hashlib.sha256(json.dumps(content,sort_keys=True).encode()).hexdigest()
-        def factor_getter():
-            return factor
         impl = 'aiter' if aiter_mode and provider.available else 'torch'
         # Every operation below can publish permanent process state. An error,
         # including BaseException or partial registration, latches before text.
@@ -401,16 +419,38 @@ def install() -> bool:
             for name, (function, fake, _) in zip(names, declarations):
                 if function is not None:
                     register(name, function, mutates_args=[], fake_impl=fake)
+            if (delayed_fusion_requested and provider.project is not None
+                    and provider.stage2_ready):
+                # Optional op: import/registration failures keep the two launches.
+                try:
+                    fused = import_module('hcu_adapter.kernels.mhc_fused_triton')
+                    digests = [hashlib.sha256(Path(inspect.getfile(module)).read_bytes()).hexdigest()
+                               for module in (backend, fused)]
+                    register('hcu_adapter_mhc_pre_mix_collapse', fused.pre_mix_collapse,
+                             mutates_args=[], fake_impl=fused.pre_mix_collapse_meta)
+                    runtime.pre_mix_collapse = torch.ops.vllm.hcu_adapter_mhc_pre_mix_collapse
+                except Exception as error:
+                    LOG.warning(
+                        'mHC fused gate/collapse unavailable; keeping two launches: %s', error)
+                else:
+                    content['delayed_fusion_sources'] = digests
+            factor = prefix + ':' + hashlib.sha256(
+                json.dumps(content, sort_keys=True).encode()).hexdigest()
+
+            def factor_getter():
+                return factor
+
             for owner, (_, _, replacement) in zip(owners, declarations):
                 owner.register_oot(replacement)
             envs.environment_variables[COMPILE_FACTOR] = factor_getter
             _publication = _Publication(os.getpid(), owners,
                 tuple(item[2] for item in declarations), envs, factor_getter, factor,
-                mode, split_k, provider)
+                mode, split_k, delayed_fusion_requested, provider)
             _check_publication(_publication)
             detail = (f'candidate {detected.architecture}/v0.33 AITER HIP mHC '
                       f'pre/delayed/fused/post via public OOT; split-K={split_k}; '
                       f'TileLang-stage2={provider.tilelang_enabled}; provider={impl}; '
+                      f'delayed-fusion={runtime.pre_mix_collapse is not None}; '
                       f'gfx938 W4A8 eager validated; Graph and other models pending'
                       if aiter_mode else
                       f'candidate {detected.architecture}/v0.33 official Torch pre/post and '
