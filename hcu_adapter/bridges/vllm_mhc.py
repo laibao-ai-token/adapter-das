@@ -160,7 +160,8 @@ def _check_providers(p):
         p.mega_provider.require_healthy()
 
 
-def _require_healthy(*, check_publication: bool) -> None:
+def require_healthy() -> None:
+    """Validate startup policy and registration at lifecycle boundaries."""
     _lifecycle.require_runtime_healthy()
     if _failure is not None:
         raise MhcCompatibilityError(_failure)
@@ -172,22 +173,9 @@ def _require_healthy(*, check_publication: bool) -> None:
     if p.pid != os.getpid():
         raise MhcCompatibilityError('mHC registration inherited from another PID; activate in this child first')
     try:
-        if check_publication:
-            _check_publication(p)
-        else:
-            _check_providers(p)
+        _check_publication(p)
     except BaseException as error:
         _refuse('mHC registration health check failed', error)
-
-
-def require_healthy() -> None:
-    """Validate startup policy and registration at lifecycle boundaries."""
-    _require_healthy(check_publication=True)
-
-
-def _require_dispatch_healthy() -> None:
-    """Check live providers and process ownership before dispatch."""
-    _require_healthy(check_publication=False)
 
 
 def _require_parameters(fn, names, defaults):
@@ -205,7 +193,6 @@ def _declare(mhc, kernels, ir):
             rms_eps: float, hc_pre_eps: float, hc_sinkhorn_eps: float, hc_post_mult_value: float,
             sinkhorn_repeat: int, n_splits: int = 1, norm_weight: torch.Tensor | None = None,
             norm_eps: float = 0.0) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        _require_dispatch_healthy()
         post, comb, layer = kernels.mhc_pre_torch(residual, fn, hc_scale, hc_base,
             rms_eps, hc_pre_eps, hc_sinkhorn_eps, hc_post_mult_value, sinkhorn_repeat, n_splits)
         normed = layer
@@ -219,7 +206,6 @@ def _declare(mhc, kernels, ir):
               sinkhorn_repeat: int, n_splits: int = 1, tile_n: int = 1,
               norm_weight: torch.Tensor | None = None, norm_eps: float = 0.0
               ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        _require_dispatch_healthy()
         updated = kernels.mhc_post_torch(x, residual, post_layer_mix, comb_res_mix)
         rest = pre(updated, fn, hc_scale, hc_base, rms_eps, hc_pre_eps,
                    hc_sinkhorn_eps, hc_post_mult_value, sinkhorn_repeat, n_splits,
@@ -263,7 +249,6 @@ def _declare_aiter(mhc, kernels, ir, backend, provider, split_k, mega=None):
         torch.ops.vllm.mhc_pre_mix_triton, torch.ops.vllm.hc_collapse_triton, split_k)
 
     def execute(function, *args):
-        _require_dispatch_healthy()
         try:
             return function(*args)
         except BaseException as error:
@@ -342,13 +327,10 @@ def _declare_aiter(mhc, kernels, ir, backend, provider, split_k, mega=None):
             if mega is not None and mega.supported(
                     residual, fn, hc_scale, hc_base, pre_mix, x, norm_weight,
                     sublayer_out, post_layer_mix, comb_res_mix, sinkhorn_repeat):
-                # The Mega op checks health at its dispatch entry, including
-                # callers that invoke the op directly.
                 return torch.ops.vllm.hcu_adapter_mhc_mega_seam(
                     residual, fn, hc_scale, hc_base, rms_eps, hc_pre_eps,
                     hc_sinkhorn_eps, hc_post_mult_value, sinkhorn_repeat,
                     pre_mix, sublayer_out, post_layer_mix, comb_res_mix)
-            _require_dispatch_healthy()
             residual = self._maybe_post(residual,sublayer_out,post_layer_mix,comb_res_mix)
             return residual, *torch.ops.vllm.hcu_adapter_mhc_delayed(residual,fn,hc_scale,hc_base,
                 rms_eps,hc_pre_eps,hc_sinkhorn_eps,hc_post_mult_value,sinkhorn_repeat,
@@ -371,7 +353,6 @@ def _declare_mega(runtime):
              pre_mix: torch.Tensor, sublayer_out: torch.Tensor,
              post_layer_mix: torch.Tensor, comb_res_mix: torch.Tensor
              ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        _require_dispatch_healthy()
         if not runtime.supported(residual, fn, hc_scale, hc_base, pre_mix, None, None,
                                  sublayer_out, post_layer_mix, comb_res_mix, sinkhorn_repeat):
             raise MhcCompatibilityError('mHC mega seam called outside its supported contract')
