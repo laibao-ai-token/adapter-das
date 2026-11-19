@@ -354,9 +354,7 @@ class MhcAiterRuntime:
             return torch.empty_like(residual)
         *outer, hc, hidden = residual.shape
         tensors = (x, residual, post_layer_mix, comb_res_mix)
-        width_matches_history = hidden != 5120
         supported = (hc == 4 and hidden >= 1024 and hidden % 1024 == 0
-                     and width_matches_history  # No historical Post v3 acceptance at this width.
                      and x.shape == (*outer, hidden)
                      and post_layer_mix.shape in ((*outer, hc), (*outer, hc, 1))
                      and comb_res_mix.shape == (*outer, hc, hc)
