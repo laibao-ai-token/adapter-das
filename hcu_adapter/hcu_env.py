@@ -182,9 +182,9 @@ REGISTRY = {
         "about": "vLLM 0.33/gfx936,gfx938 mHC: aiter (default), torch or stock; stock remains the opt-out; startup only",
     },
     "HCU_VLLM_MHC_MEGA": {
-        "env": "HCU_VLLM_MHC_MEGA", "default": "0",
+        "env": "HCU_VLLM_MHC_MEGA", "default": "1",
         "hosts": ("vllm",),
-        "about": "Experimental gfx938/vLLM 0.33 shifted mega_mhc seam inside aiter mode; 0 keeps AITER, 1 opts in; startup only",
+        "about": "Shifted mega_mhc seam defaults on for the validated gfx938 vLLM and DeepGEMM builds in AITER mode. 0 disables it at startup.",
     },
     "HCU_VLLM_MHC_PRE_SPLIT_K": {
         "env": "HCU_VLLM_MHC_PRE_SPLIT_K", "default": "auto",
@@ -627,8 +627,8 @@ REGISTRY = {
                  "（会崩）作对照",
     },
     "HCU_TRITON_FUSED_SELECTORS": {
-        "env": "HCU_TRITON_FUSED_SELECTORS", "default": "0",
-        "about": "vLLM native MLA sparse decode 的 selector 候选。=1 在有界 HCU "
+        "env": "HCU_TRITON_FUSED_SELECTORS", "default": "1",
+        "about": "vLLM native MLA sparse decode 的 selector 默认开启。=1 在有界 HCU "
                  "shape 上用单内核过滤、升序排序、写 padded ids/counts；"
                  "超融合预算回退三步 Triton。=0 使用 Base eager selector。",
     },

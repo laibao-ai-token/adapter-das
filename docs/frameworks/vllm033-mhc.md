@@ -26,8 +26,10 @@ AITER 模式的 delayed Pre 保持两段式：stage1 使用 `mhc_pre_gemm_sqrsum
 
 ## 实验性 DeepGEMM shifted 接缝
 
-`HCU_VLLM_MHC_MEGA` 只接受 `0`（默认）和 `1`。`1` 需要 aiter 模式、gfx938、
-vLLM 0.33 及包含 Mega mHC 的 `deepgemm` 构建。核对过的供应商源码为
+`HCU_VLLM_MHC_MEGA` 接受显式 `0` 和 `1`。在 gfx938 的 AITER 模式下，已验证的
+vLLM 构建 `g7364da` 和 DeepGEMM 构建 `g793351` 默认开启，其他构建保持原路径。
+显式 `1` 需要 aiter 模式、gfx938、vLLM 0.33 和包含 Mega mHC 的 DeepGEMM 构建。
+核对过的供应商源码为
 `090ed77f489644c36388dc0bbc348011cfa18a04`（`publish/ys_develop_Mega_MHC`），
 包含公开的 `mega_mhc`、`mega_mhc_prepare_fn` 和对应 gfx938 原生实现。
 历史安装包为 `deepgemm 2.1.0+dtk2610.torch2130.2611122142`（DTK 26.10 / Torch 2.13）。

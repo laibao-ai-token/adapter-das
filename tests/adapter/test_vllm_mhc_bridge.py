@@ -204,7 +204,26 @@ def test_mega_rejects_unsupported_startup_before_import(seams, monkeypatch, mode
     assert not s.calls and not s.records
 
 
-def test_mega_requires_explicit_binary_opt_in_and_respects_kill_switch(seams, monkeypatch):
+@pytest.mark.parametrize(('mode', 'arch', 'deepgemm', 'expected'), [
+    ('aiter', 'gfx938', True, True),
+    ('aiter', 'gfx936', True, False),
+    ('aiter', 'gfx938', False, False),
+    ('stock', 'gfx938', True, False),
+    ('torch', 'gfx938', True, False),
+])
+def test_mega_default_is_scoped_and_can_be_disabled(seams, monkeypatch, mode, arch, deepgemm, expected):
+    m = seams.m
+    monkeypatch.setenv('HCU_VLLM_MHC_IMPL', mode)
+    monkeypatch.setattr(host, '_installed_vllm_version', lambda: '0.33.0+dtk2610.torch2130.2611101131.g7364da')
+    monkeypatch.setattr(host, 'detect_hcu', lambda: host.HcuDetection(True, arch, 'test'))
+    monkeypatch.setattr(m.metadata, 'version', lambda _: (
+        '2.1.0+dtk2610.torch2130.2611122142.g793351' if deepgemm else '2.1.0'))
+    assert m.selected_mega() is expected
+    monkeypatch.setenv('HCU_VLLM_MHC_MEGA', '0')
+    assert not m.selected_mega()
+
+
+def test_mega_requires_binary_override_and_respects_kill_switch(seams, monkeypatch):
     s = seams
     assert not s.m.selected_mega()
     monkeypatch.setenv('HCU_VLLM_MHC_MEGA', 'true')

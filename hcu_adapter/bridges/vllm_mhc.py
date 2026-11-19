@@ -9,8 +9,9 @@ no vendor implementation, framework source rewrite or private registry is used.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from functools import lru_cache
 import hashlib
-from importlib import import_module
+from importlib import import_module, metadata
 import inspect
 import json
 import logging
@@ -95,13 +96,32 @@ def selected_delayed_fusion(mode):
     return value == '1'
 
 
+@lru_cache(maxsize=1)
+def _supports_mega_default():
+    from hcu_adapter.bridges.vllm import detect_hcu, _installed_vllm_version
+
+    if _installed_vllm_version() != '0.33.0+dtk2610.torch2130.2611101131.g7364da':
+        return False
+    try:
+        if metadata.version('deepgemm') != '2.1.0+dtk2610.torch2130.2611122142.g793351':
+            return False
+    except metadata.PackageNotFoundError:
+        return False
+    detected = detect_hcu()
+    return detected.detected and detected.architecture == 'gfx938'
+
+
 def selected_mega():
     if op_disabled('vllm_mhc'):
         return False
-    value, _ = hcu_env.resolve(MEGA_VARIABLE, host='vllm')
+    value, source = hcu_env.resolve(MEGA_VARIABLE, host='vllm')
     if value not in ('0', '1'):
         raise ValueError(f'{MEGA_VARIABLE} must be 0 or 1')
-    return value == '1'
+    if value == '0':
+        return False
+    if source == 'default':
+        return selected_mode() == 'aiter' and _supports_mega_default()
+    return True
 
 
 def _refuse(reason, error=None):

@@ -158,7 +158,9 @@ def test_large_width_retains_eager(selector_device, monkeypatch):
 
 
 @pytest.mark.parametrize('fused,fast,width,is_cuda,use_triton', [
-    (None, '0', 129, True, False),
+    (None, '0', 129, True, True),
+    (None, '0', 4097, True, False),
+    (None, '0', 129, False, False),
     ('0', '0', 129, True, False),
     ('0', '1', 129, True, False),
     ('1', '0', 129, True, True),
