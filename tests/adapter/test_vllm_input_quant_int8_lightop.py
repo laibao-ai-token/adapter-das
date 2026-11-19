@@ -7,6 +7,7 @@ CPU only: the LightOp native op is replaced by a fake module so the rebind and
 every fallback branch can be exercised without a device.
 """
 
+import logging
 import sys
 import types
 
@@ -103,6 +104,26 @@ def test_install_rebinds_and_hits(monkeypatch):
     assert scales.shape == (4, 1) and scales.eq(0.25).all()
     assert azp is None
     assert bridge._COUNTS == {"hit": 1}
+
+
+def test_hit_logs_once_at_info(monkeypatch, caplog):
+    _activate(monkeypatch)
+    module = _make_module()
+    assert bridge.install(module)
+    x = _x()
+
+    with caplog.at_level(logging.INFO, logger=bridge.LOG.name):
+        module.scaled_int8_quant(x)
+        bridge._COUNTS["hit"] = 1023
+        module.scaled_int8_quant(x)
+
+    hits = [record for record in caplog.records
+            if "per-token INT8 first hit:" in record.message
+            or "per-token INT8 progress:" in record.message]
+    assert len(hits) == 1
+    assert hits[0].levelno == logging.INFO
+    assert "hit=1 fallback=0" in hits[0].message
+    assert bridge._COUNTS == {"hit": 1024}
 
 
 def test_smooth_scale_is_cached_per_shape(monkeypatch):

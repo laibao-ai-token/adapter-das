@@ -64,12 +64,11 @@ Measured (single card, `workspace/probes/int8_quant_ab_v2.py`)
 
 Accounting
 ----------
-`hit` and per-reason fallback counters live in-process. Counters are bumped
-lock-free and every first hit / first fallback / 1024th hit emits one
-`hit=... fallback=...` line, so worker-side counts are visible in the server log
-even when the benchmark stops workers before the `atexit` flush. Correlate
-hits with the LightOp kernel in the trace. Upstream calls can still appear
-for graph captures and inputs outside the LightOp contract.
+Each worker keeps lock-free `hit` and per-reason fallback counters. The first
+hit logs at INFO, and the first fallback for each reason logs at WARNING.
+The `atexit` hook reports the totals on normal shutdown. Correlate hits with
+the LightOp kernel in the trace. Upstream calls can still appear for graph
+captures and inputs outside the LightOp contract.
 
 Known limits (validate in the service, do not treat as proven)
 --------------------------------------------------------------
@@ -289,13 +288,8 @@ def _wrap(original):
             )
             return original(input, scale, azp, symmetric)
 
-        # Progress lines are the worker-side counter evidence: the script
-        # SIGKILLs the process group, so the atexit flush below never runs in
-        # engine workers. Boundaries are log-once by construction.
-        hit = _bump("hit")
-        if hit == 1 or not hit % 1024:
-            LOG.warning("HCU LightOp per-token INT8 progress: %s",
-                        _counts_line())
+        if _bump("hit") == 1:
+            LOG.info("HCU LightOp per-token INT8 first hit: %s", _counts_line())
         return quantized, scales, None
 
     return scaled_int8_quant
