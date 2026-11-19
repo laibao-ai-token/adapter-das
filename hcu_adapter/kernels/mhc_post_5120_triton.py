@@ -58,7 +58,12 @@ def post_5120(x, residual, post, comb):
         raise ValueError('H5120 Post requires contiguous gfx938 BF16, FP32 mixes, '
                          'highest precision and CUDA autocast disabled')
     out = torch.empty_like(residual)
-    _mhc_post_5120[(residual.shape[0], 20)](
-        x, residual, post, comb, out, 256,
-        num_warps=4, enable_fp_fusion=False)
+    rows = residual.shape[0]
+    # Keep the exact per-element arithmetic; reduce CTA overhead at decode
+    # buckets while preserving the existing launch for larger/prefill batches.
+    block, warps = (1024, 2) if 32 <= rows <= 64 else (
+        (256, 8) if rows <= 16 else (256, 4))
+    _mhc_post_5120[(rows, triton.cdiv(5120, block))](
+        x, residual, post, comb, out, block,
+        num_warps=warps, enable_fp_fusion=False)
     return out
