@@ -156,9 +156,9 @@ def try_decode(*, q, kv_cache, swa_k_cache, swa_only, topk_indices, topk_lens,
     # DTK D512 native decode consumes H64/H128. Pad queries/sinks only, so TP
     # slices (H4/H8/H16/...) use the same packed cache without any KV gather.
     native_heads = 64 if heads <= 64 else 128
-    from .mla_decode_io import native_query_and_sink, try_mask_copy
+    from .mla_decode_io_triton import native_query_and_sink, try_mask_copy
     queries, sink = native_query_and_sink(q, attn_sink, native_heads)
-    from .mla_native_plan import prepare_native_plan
+    from .mla_native_plan_triton import prepare_native_plan
     metadata = prepare_native_plan(main_lens, extra_lens, native_heads,
         main_ids.shape[-1], 0 if extra_ids is None else extra_ids.shape[-1],
         provider, metadata_factory,
@@ -172,7 +172,7 @@ def try_decode(*, q, kv_cache, swa_k_cache, swa_only, topk_indices, topk_lens,
         extra_indices_in_kvcache=extra_ids, extra_topk_length=extra_lens)
     result = result[:, 0, :heads]
     if output_mxfp8 is None:
-        from .mla_decode_rope import try_mask_copy_rope
+        from .mla_decode_rope_triton import try_mask_copy_rope
         if try_mask_copy_rope(result, output, main_lens, extra_lens,
                               inv_rope_positions, inv_rope_cos_sin_cache):
             return rows
