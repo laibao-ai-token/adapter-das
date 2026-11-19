@@ -90,14 +90,28 @@ def _require_signature(fn, names, defaults=None, integer_return=False):
         raise FlashMLADecodeCompatibilityError('FlashMLA decode ABI changed: ' + fn.__name__)
 
 
+def _check_bindings(p):
+    if (getattr(p.module, 'rocm_sparse_attn_decode', None) is not p.replacement
+            or getattr(p.module, 'DeepseekV41ROCMAiterMLAAttention', None) is not p.cls
+            or getattr(p.cls, '_forward_decode', None) is not p.method
+            or getattr(p.module, 'rocm_inverse_rope_mxfp8_rows', None) is not p.epilogue):
+        _refuse('FlashMLA decode binding/method/epilogue drift; start a fresh process')
+
+
 def _check(p):
     if selected_mode() != 'native':
         _refuse('FlashMLA decode policy changed; start a fresh process')
-    if (p.module.rocm_sparse_attn_decode is not p.replacement
-            or p.module.DeepseekV41ROCMAiterMLAAttention is not p.cls
-            or p.cls._forward_decode is not p.method
-            or p.module.rocm_inverse_rope_mxfp8_rows is not p.epilogue):
-        _refuse('FlashMLA decode binding/method/epilogue drift; start a fresh process')
+    _check_bindings(p)
+
+
+def _require_dispatch_healthy():
+    # Policy is startup-only. Lifecycle boundaries resolve it and latch drift.
+    if _failure is not None:
+        raise FlashMLADecodeCompatibilityError(_failure)
+    p = _publication
+    if p is None or p.pid != os.getpid():
+        raise FlashMLADecodeCompatibilityError('FlashMLA decode requires child runtime activation')
+    _check_bindings(p)
 
 
 def require_healthy():
@@ -179,7 +193,7 @@ def install():
                    extra_cache_nan_free=False, adaptive_splits=False,
                    inv_rope_positions=None, inv_rope_cos_sin_cache=None,
                    output_mxfp8=None) -> int:
-            require_healthy()
+            _require_dispatch_healthy()
             arguments = dict(q=q, kv_cache=kv_cache, swa_k_cache=swa_k_cache,
                 swa_only=swa_only, topk_indices=topk_indices, topk_lens=topk_lens,
                 swa_indices=swa_indices, swa_lens=swa_lens,

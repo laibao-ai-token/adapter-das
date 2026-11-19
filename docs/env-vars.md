@@ -238,6 +238,10 @@ cookbook §0 已注明 seam 默认清单 + "新配方行内每个 env 必须标�
 什么都不设。需要调试/隔离时按上表显式设置，并看启动日志的
 `HCU adapter env:` 行确认生效来源。
 
+## FlashMLA 启动策略
+
+Prefill 和 Decode 的启动策略由运行时激活和生命周期健康检查验证。逐层转发只检查本进程归属、已锁存故障和函数绑定。修改 FlashMLA 模式或相关快关后，重启服务以应用新策略。
+
 ## 给维护者
 
 - 新增变量：`hcu_env.py::REGISTRY` 登记（env/default/auto/about 四项，
