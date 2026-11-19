@@ -317,6 +317,11 @@ def build():
             rows, width = logits.shape
             if not rows or not width:
                 return torch.full((rows, k), -1, dtype=torch.int32, device=logits.device)
+            if logits.is_cuda:
+                from hcu_adapter.kernels.indexer_topk_lightop import select_topk
+                native = select_topk(logits, starts, ends, k)
+                if native is not None:
+                    return native
             top = logits.topk(min(k, width), dim=-1)
             if logits.is_cuda:
                 from hcu_adapter.kernels.indexer_topk_post_triton import finish_topk
