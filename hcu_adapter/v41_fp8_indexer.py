@@ -589,9 +589,12 @@ def build():
                 raise V41IndexerError(
                     "V41 FP4 indexer execution is not bound; the plugin owns it")
 
+            def _fp4_check_dispatch(self):
+                _resolve("health")
+
             def forward_hip(self, hidden_states, q_quant, k, weights):
                 if getattr(self, "_hcu_fp4", False):
-                    _resolve("health")
+                    self._fp4_check_dispatch()
                     if k is not None:
                         raise ValueError("FP4 reader must not insert a second K")
                     return self._fp4_execute(hidden_states, q_quant, weights)
