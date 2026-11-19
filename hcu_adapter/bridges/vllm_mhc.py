@@ -323,14 +323,16 @@ def _declare_aiter(mhc, kernels, ir, backend, provider, split_k, mega=None):
                         hc_sinkhorn_eps, hc_post_mult_value, sinkhorn_repeat, pre_mix=None,
                         x=None, norm_weight=None, norm_eps=1e-6, sublayer_out=None,
                         post_layer_mix=None, comb_res_mix=None):
-            require_healthy()
             if mega is not None and mega.supported(
                     residual, fn, hc_scale, hc_base, pre_mix, x, norm_weight,
                     sublayer_out, post_layer_mix, comb_res_mix, sinkhorn_repeat):
+                # The Mega op checks health at its dispatch entry, including
+                # callers that invoke the op directly.
                 return torch.ops.vllm.hcu_adapter_mhc_mega_seam(
                     residual, fn, hc_scale, hc_base, rms_eps, hc_pre_eps,
                     hc_sinkhorn_eps, hc_post_mult_value, sinkhorn_repeat,
                     pre_mix, sublayer_out, post_layer_mix, comb_res_mix)
+            require_healthy()
             residual = self._maybe_post(residual,sublayer_out,post_layer_mix,comb_res_mix)
             return residual, *torch.ops.vllm.hcu_adapter_mhc_delayed(residual,fn,hc_scale,hc_base,
                 rms_eps,hc_pre_eps,hc_sinkhorn_eps,hc_post_mult_value,sinkhorn_repeat,

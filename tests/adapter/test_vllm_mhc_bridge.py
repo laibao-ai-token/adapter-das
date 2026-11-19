@@ -288,14 +288,16 @@ def test_mega_provider_missing_refuses_before_publication(seams, monkeypatch):
     assert not s.calls and not s.records
 
 
-@pytest.mark.parametrize('entry', ['python', 'opaque'])
+@pytest.mark.parametrize('entry', ['fallback', 'mega', 'opaque'])
 def test_mega_route_fallback_and_health_at_both_entries(seams, monkeypatch, entry):
     s = seams
     aiter_runtime, ops = _mega_seams(s, monkeypatch)
     monkeypatch.setenv('HCU_VLLM_MHC_MEGA', '1')
     monkeypatch.setenv('HCU_VLLM_MHC_DELAYED_FUSION', '1')
     events = []
-    provider = SimpleNamespace(require_healthy=lambda: None, fingerprint=lambda: {'source': 'vendor'})
+    health_checks = []
+    provider = SimpleNamespace(require_healthy=lambda: health_checks.append('check'),
+                               fingerprint=lambda: {'source': 'vendor'})
     mega_runtime = SimpleNamespace(supported=lambda *args: args[5] is None,
         seam=lambda *args: events.append('mega') or ('updated', 'post', 'comb', 'layer', 'next'),
         seam_meta=object())
@@ -325,18 +327,26 @@ def test_mega_route_fallback_and_health_at_both_entries(seams, monkeypatch, entr
     delayed = s.mhc.MHCPreDelayedOp().forward_hip
     args = ('residual', 'fn', 'scale', 'base', 1e-6, 1e-6, 1e-6, 2.0, 20, 'pre_mix')
     kwargs = dict(sublayer_out='sublayer', post_layer_mix='p', comb_res_mix='c')
+    health_checks.clear()
     assert delayed(*args, **kwargs) == ('updated', 'post', 'comb', 'layer', 'next')
+    assert health_checks == ['check']
     assert delayed(*args, x='entry x', **kwargs) == ('updated', 'post', 'comb', 'layer', 'next')
     assert events == ['mega', 'post', 'delayed']
     opaque = ops.hcu_adapter_mhc_mega_seam
     direct_args = args + tuple(kwargs.values())
+    health_checks.clear()
     assert opaque(*direct_args) == ('updated', 'post', 'comb', 'layer', 'next')
+    assert health_checks == ['check']
+
     def unhealthy():
         raise RuntimeError('provider binding changed')
+
     provider.require_healthy = unhealthy
     with pytest.raises(s.m.MhcCompatibilityError, match='provider binding changed'):
-        if entry == 'python':
+        if entry == 'fallback':
             delayed(*args, x='entry x', **kwargs)
+        elif entry == 'mega':
+            delayed(*args, **kwargs)
         else:
             opaque(*direct_args)
     assert events == ['mega', 'post', 'delayed', 'mega']
