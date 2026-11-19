@@ -48,7 +48,8 @@ def finish_topk(values, indices, starts, ends, k, width):
             or starts.shape != values.shape[:1] or ends.shape != starts.shape
             or starts.dtype != torch.int32 or ends.dtype != torch.int32
             or not starts.is_contiguous() or not ends.is_contiguous()
-            or any(t.device != values.device for t in (indices, starts, ends))):
+            or any(t.device != values.device for t in (indices, starts, ends))
+            or any(t.is_neg() for t in (values, indices, starts, ends))):
         return None
     if not _supported_device(values.device.index):
         return None

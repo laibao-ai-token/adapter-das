@@ -74,7 +74,8 @@ def select_topk(logits, starts, ends, k):
             or starts.shape != logits.shape[:1] or ends.shape != starts.shape
             or starts.dtype != torch.int32 or ends.dtype != torch.int32
             or not starts.is_contiguous() or not ends.is_contiguous()
-            or starts.device != logits.device or ends.device != logits.device):
+            or starts.device != logits.device or ends.device != logits.device
+            or any(t.is_neg() for t in (logits, starts, ends))):
         return None
     if not _supported_device(logits.device.index):
         return None
