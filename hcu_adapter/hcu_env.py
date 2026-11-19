@@ -326,13 +326,13 @@ REGISTRY = {
                  "其余契约与任何 LightOp 异常一律回退上游原方法。"
                  "零行 scale 上游取下界 1/(448*512)、LightOp 给 0（两者反量化"
                  "结果都是 0）；amax 低于下界的行 scale 语义不同。"
-                 "默认 1 = 开启（用户 2026-11-17 决定翻默认）；=0 关闭。"
+                 "默认 1 = 开启，设 0 关闭。编译与图捕获使用上游原方法。"
                  "注：这条会改数值（正常行约 0.06% 元素差 1 ulp；"
                  "amax 低于 clamp 下界的行 scale 语义不同），"
                  "验收未通过时用 =0 回到上游实现。",
     },
     "HCU_LIGHTOP_PER_TOKEN_INT8": {
-        "env": "HCU_LIGHTOP_PER_TOKEN_INT8", "default": "0",
+        "env": "HCU_LIGHTOP_PER_TOKEN_INT8", "default": "1",
         "about": "vLLM 0.33 动态 per-token INT8 激活量化改走 LightOp "
                  "per_token_dynamic_quant_int8（原生 op，直接写 [M,1] scale；"
                  "绑定 vllm._custom_ops.scaled_int8_quant，树内调用点全是 "
@@ -343,8 +343,7 @@ REGISTRY = {
                  "无差、零行 scale 两边都是 0），所以不设诊断开关。"
                  "注意别用 lightop.quant.per_token_quant_int8：那条 native "
                  "快路只覆盖 K==128，其余宽度落 Triton 且慢 2.7~2.95×。"
-                 "默认 0 = 关闭（opt-in，未做服务 A/B 前不默认生效）；"
-                 "=1 开启。",
+                 "默认 1 = 开启，设 0 关闭。编译与图捕获使用上游原函数。",
     },
     "HCU_LIGHTOP_FP8_AMAX_DIAG": {
         "env": "HCU_LIGHTOP_FP8_AMAX_DIAG", "default": "0",

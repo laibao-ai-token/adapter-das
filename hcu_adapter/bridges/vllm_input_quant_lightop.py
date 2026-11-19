@@ -46,9 +46,9 @@ Accounting
 immediately (so a silently misconfigured deployment is visible without waiting
 for shutdown) and a final `hit=... fallback=...` line is flushed at exit.
 
-Gate: on by default (`HCU_LIGHTOP_PER_TOKEN_FP8=1`); set `=0` to fall back to
-upstream. The fast path changes numerics slightly (see above), so keep `=0`
-handy for A/B runs and rollback.
+Gate: on by default (`HCU_LIGHTOP_PER_TOKEN_FP8=1`). Set `=0` before startup
+for the upstream path. Compilation and graph capture use upstream quantization.
+The diagnostic runs only on eligible calls outside capture.
 """
 
 from __future__ import annotations
@@ -145,6 +145,10 @@ def _arm_atexit() -> None:
     atexit.register(_flush)
 
 
+def _device_ok(x):
+    return x.is_cuda and torch.cuda.current_device() == x.device.index
+
+
 def _ineligible(instance, x, scale, scale_ub, per_token):
     """Return the fallback reason, or None when the LightOp contract holds."""
     if scale is not None:
@@ -175,9 +179,16 @@ def _wrap(module, original):
 
     @functools.wraps(original)
     def forward_cuda(self, x, scale=None, scale_ub=None, use_triton=False):
+        if torch.compiler.is_compiling():
+            return original(self, x, scale, scale_ub, use_triton)
         reason = _ineligible(self, x, scale, scale_ub, per_token)
-        if diag and x.dim() == 2:
-            _diag_rows(x, floor)
+        if reason is None:
+            if not _device_ok(x):
+                reason = "device"
+            elif torch.cuda.is_current_stream_capturing():
+                reason = "capture"
+            elif x.numel() == 0:
+                reason = "empty"
         if reason is not None:
             _bump(reason)
             _log_once(
@@ -187,6 +198,8 @@ def _wrap(module, original):
             )
             return original(self, x, scale, scale_ub, use_triton)
 
+        if diag:
+            _diag_rows(x, floor)
         try:
             quantized, scales = _lightop_fn()(x, dtype=fp8_dtype)
         except Exception:  # noqa: BLE001 - a vendor kernel must never break serving

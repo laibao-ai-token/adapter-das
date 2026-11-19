@@ -67,21 +67,15 @@ Accounting
 `hit` and per-reason fallback counters live in-process. Counters are bumped
 lock-free and every first hit / first fallback / 1024th hit emits one
 `hit=... fallback=...` line, so worker-side counts are visible in the server log
-even though the benchmark script SIGKILLs the process group (which skips the
-`atexit` flush). Cross-check them against the trace: with this bridge enabled
-the upstream `vllm::dynamic_scaled_int8_quant_kernel` must not appear at all.
+even when the benchmark stops workers before the `atexit` flush. Correlate
+hits with the LightOp kernel in the trace. Upstream calls can still appear
+for graph captures and inputs outside the LightOp contract.
 
 Known limits (validate in the service, do not treat as proven)
 --------------------------------------------------------------
-* The `ones(hidden)` smooth factor is cached per `(device, hidden)` and created
-  once, on whichever stream first hits this path; later calls reuse it without
-  any event/sync between streams. The tensor is immutable all-ones, and this
-  call path allocates its output/scales on the current stream anyway (the
-  upstream implementation does the same), so the single-stream assumption is
-  inherited rather than introduced -- but first-use ordering, use during
-  cudagraph capture and any multi-stream caller still need to be checked in the
-  service before the cache counts as safe. The creating stream id is recorded
-  and logged once (key `smooth:<device>,<hidden>`) so a trace can confirm it.
+* The `ones(hidden)` smooth factor is cached by device, stream and hidden
+  width. The bridge uses upstream quantization during compilation and graph
+  capture. Each eligible stream initializes its own cached factor in order.
 * Accelerator placement is an explicit gate (`_device_ok`): a CPU tensor falls
   back with reason `device` instead of reaching the HCU op and logging an
   exception fallback.
@@ -124,6 +118,7 @@ _LOGGED: set[str] = set()
 _ATEXIT_ARMED = False
 _SMOOTH: dict[tuple, torch.Tensor] = {}
 _OP = None
+_BINDING = None
 
 
 def _bump(reason: str) -> int:
@@ -195,24 +190,22 @@ def _device_ok(x) -> bool:
     return bool(getattr(x, "is_cuda", False))
 
 
-def _current_stream_id() -> int:
-    """Stream id for diagnostics only; -1 when no device is initialized."""
-    try:
-        return int(torch.cuda.current_stream().cuda_stream)
-    except Exception:  # noqa: BLE001 - CPU tests / no device: diagnostics only
-        return -1
+def _execution_fallback(x):
+    if torch.cuda.current_device() != x.device.index:
+        return "device"
+    if torch.cuda.is_current_stream_capturing():
+        return "capture"
+    return None
+
+
+def _current_stream_id(device: torch.device) -> int:
+    return int(torch.cuda.current_stream(device).cuda_stream)
 
 
 def _smooth_scale(hidden: int, device: torch.device) -> torch.Tensor:
-    """Cached `ones(hidden)` smooth factor; multiplying by 1.0 is exact.
-
-    Created once per `(device index, hidden)` on the stream that first uses it;
-    there is no cross-stream event because the buffer is immutable and the call
-    already allocates its output on the current stream (see "Known limits").
-    The cache read is lock-free: `dict.get` is atomic and a duplicate creation
-    under a race would only waste one 32 KiB buffer.
-    """
-    key = (device.index, hidden)
+    """Keep each smooth factor on its creating stream outside graph capture."""
+    stream = _current_stream_id(device)
+    key = (device.index, stream, hidden)
     cached = _SMOOTH.get(key)
     if cached is not None:
         return cached
@@ -221,9 +214,9 @@ def _smooth_scale(hidden: int, device: torch.device) -> torch.Tensor:
         _SMOOTH.setdefault(key, cached)
         cached = _SMOOTH[key]
     _log_once(
-        "smooth:%s,%d" % (device, hidden), logging.INFO,
+        f"smooth:{device},{stream},{hidden}", logging.INFO,
         "HCU LightOp per-token INT8 smooth cache created: hidden=%d "
-        "device=%s stream=%d", hidden, device, _current_stream_id(),
+        "device=%s stream=%d", hidden, device, stream,
     )
     return cached
 
@@ -261,7 +254,11 @@ def _wrap(original):
 
     @functools.wraps(original)
     def scaled_int8_quant(input, scale=None, azp=None, symmetric=True):
+        if torch.compiler.is_compiling():
+            return original(input, scale, azp, symmetric)
         reason = _ineligible(input, scale, azp, symmetric)
+        if reason is None:
+            reason = _execution_fallback(input)
         if reason is not None:
             _bump(reason)
             _log_once(
@@ -304,9 +301,20 @@ def _wrap(original):
     return scaled_int8_quant
 
 
+def native_quant_binding(module):
+    """Return the original helper only while this bridge still owns the binding."""
+    current = module.scaled_int8_quant
+    binding = _BINDING
+    if binding is not None and binding[0] is module and binding[1] is current:
+        return binding[2]
+    return current
+
+
 def install(module=None) -> bool:
     """Rebind `vllm._custom_ops.scaled_int8_quant` when the contract holds."""
     from hcu_adapter import hcu_env
+
+    global _BINDING
 
     if not hcu_env.enabled(_ENV):
         LOG.info("HCU LightOp per-token INT8: skipped (%s=0)", _ENV)
@@ -342,7 +350,9 @@ def install(module=None) -> bool:
                     error)
         return False
 
-    setattr(module, "scaled_int8_quant", _wrap(original))
+    wrapper = _wrap(original)
+    _BINDING = (module, wrapper, original)
+    setattr(module, "scaled_int8_quant", wrapper)
     setattr(module, _MARKER, True)
     _arm_atexit()
     LOG.warning(

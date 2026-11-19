@@ -63,9 +63,11 @@ def _reset(monkeypatch):
     bridge._COUNTS.clear()
     bridge._LOGGED.clear()
     bridge._SMOOTH.clear()
-    bridge._OP = None
-    bridge._OP = None  # cached native op must not leak between tests
-    monkeypatch.setenv(bridge._ENV, "1")  # 默认关，测试里显式打开
+    monkeypatch.setattr(bridge, '_OP', None)
+    monkeypatch.setattr(bridge, '_BINDING', None)
+    monkeypatch.setenv(bridge._ENV, "1")
+    monkeypatch.setattr(bridge, '_execution_fallback', lambda x: None)
+    monkeypatch.setattr(bridge, '_current_stream_id', lambda device: -1)
     # CPU tests cannot allocate accelerator tensors; the device gate is
     # exercised separately in test_cpu_activation_falls_back.
     monkeypatch.setattr(bridge, "_device_ok", lambda x: True)
@@ -134,11 +136,36 @@ def test_existing_marker_skips_install(monkeypatch):
     assert module.scaled_int8_quant is _upstream
 
 
-def test_default_is_off(monkeypatch):
+def test_default_is_on(monkeypatch):
     _activate(monkeypatch)
     monkeypatch.delenv(bridge._ENV, raising=False)
 
-    assert bridge.install(_make_module()) is False
+    assert bridge.install(_make_module()) is True
+
+
+def test_graph_capture_uses_original_and_exposes_exact_binding(monkeypatch):
+    calls = _activate(monkeypatch)
+    module = _make_module()
+    assert bridge.install(module)
+    assert bridge.native_quant_binding(module) is _upstream
+    monkeypatch.setattr(bridge, '_execution_fallback', lambda x: 'capture')
+    assert module.scaled_int8_quant(_x())[0] == 'upstream'
+    assert not calls and not bridge._SMOOTH
+
+    foreign = bridge._wrap(_upstream)
+    module.scaled_int8_quant = foreign
+    assert bridge.native_quant_binding(module) is foreign
+
+
+def test_smooth_cache_is_separate_per_stream(monkeypatch):
+    stream = [1]
+    monkeypatch.setattr(bridge, '_current_stream_id', lambda device: stream[0])
+    device = torch.device('cpu')
+    first = bridge._smooth_scale(HIDDEN, device)
+    stream[0] = 2
+    assert bridge._smooth_scale(HIDDEN, device) is not first
+    stream[0] = 1
+    assert bridge._smooth_scale(HIDDEN, device) is first
 
 
 def test_kill_switch_skips_install(monkeypatch):

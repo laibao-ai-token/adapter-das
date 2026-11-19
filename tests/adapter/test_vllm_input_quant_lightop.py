@@ -75,7 +75,9 @@ def _reset(monkeypatch):
     bridge._LOGGED.clear()
     bridge._DIAG.update(calls=0, rows=0, tiny=0, floor=0.0)
     monkeypatch.delenv(bridge._AMAX_DIAG_ENV, raising=False)
-    monkeypatch.setenv("HCU_LIGHTOP_PER_TOKEN_FP8", "1")   # 默认开，测试仍显式固定
+    monkeypatch.setenv("HCU_LIGHTOP_PER_TOKEN_FP8", "1")
+    monkeypatch.setattr(bridge, '_device_ok', lambda x: True)
+    monkeypatch.setattr(torch.cuda, 'is_current_stream_capturing', lambda: False)
     yield
     bridge._COUNTS.clear()
     bridge._LOGGED.clear()
@@ -173,6 +175,19 @@ def test_fallback_reasons(monkeypatch, kwargs, tensor, reason):
     assert out[0] == "upstream"
     assert calls == []
     assert bridge._COUNTS == {reason: 1}
+
+
+@pytest.mark.parametrize('capture', [False, True])
+def test_non_device_or_capture_uses_original(monkeypatch, capture):
+    calls = _activate(monkeypatch)
+    module = _make_module()
+    assert bridge.install(module)
+    monkeypatch.setattr(bridge, '_device_ok', lambda x: capture)
+    monkeypatch.setattr(torch.cuda, 'is_current_stream_capturing', lambda: capture)
+    x = torch.ones(2, 8, dtype=torch.bfloat16)
+    assert module.QuantFP8.forward_cuda(_instance(), x)[0] == 'upstream'
+    assert not calls
+    assert bridge._COUNTS == {'capture' if capture else 'device': 1}
 
 
 def test_non_contiguous_falls_back(monkeypatch):
