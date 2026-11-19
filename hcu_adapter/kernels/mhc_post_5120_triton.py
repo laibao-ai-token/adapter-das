@@ -9,6 +9,8 @@ import triton.language as tl
 
 def supported(x, residual, post, comb):
     tensors = (x, residual, post, comb)
+    # "highest" does not disable autocast of the Torch reference's FP32 bmm.
+    # Keep autocast callers on that reference instead of fixed FP32 FMA.
     if (not all(isinstance(t, torch.Tensor) for t in tensors)
             or residual.ndim != 3 or residual.shape[1:] != (4, 5120)
             or not 0 < residual.shape[0] <= 1024
@@ -18,7 +20,8 @@ def supported(x, residual, post, comb):
             or x.dtype != torch.bfloat16 or residual.dtype != torch.bfloat16
             or post.dtype != torch.float32 or comb.dtype != torch.float32
             or not all(t.is_cuda and t.device == x.device and t.is_contiguous() for t in tensors)
-            or torch.get_float32_matmul_precision() != 'highest'):
+            or torch.get_float32_matmul_precision() != 'highest'
+            or torch.is_autocast_enabled('cuda')):
         return False
     return getattr(torch.cuda.get_device_properties(x.device), 'gcnArchName', '').split(':')[0] == 'gfx938'
 
@@ -52,7 +55,8 @@ def _mhc_post_5120(X, R, P, C, O, BLOCK: tl.constexpr):
 
 def post_5120(x, residual, post, comb):
     if not supported(x, residual, post, comb):
-        raise ValueError('H5120 Post requires contiguous gfx938 BF16, FP32 mixes and highest precision')
+        raise ValueError('H5120 Post requires contiguous gfx938 BF16, FP32 mixes, '
+                         'highest precision and CUDA autocast disabled')
     out = torch.empty_like(residual)
     _mhc_post_5120[(residual.shape[0], 20)](
         x, residual, post, comb, out, 256,
