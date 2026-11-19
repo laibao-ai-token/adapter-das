@@ -85,6 +85,45 @@ class HcuDSV41Int8LinearMethod(CompressedTensorsLinearMethod):
             # Other backends retain native postprocess and nonempty apply.
             layer._hcu_int8_empty_state = "unsupported"
 
+    def supports_shared_expert_prequantized(self, layer):
+        witness = getattr(layer, "_hcu_int8_empty_witness", None)
+        if getattr(layer, "_hcu_int8_empty_state", None) != "ready" or witness is None:
+            return False
+        scheme, weight = layer.scheme, layer.weight
+        return (
+            witness.scheme is scheme
+            and witness.kernel is scheme.kernel
+            and type(scheme.kernel) is TritonInt8ScaledMMLinearKernel
+            and scheme.strategy == "channel"
+            and not scheme.is_static_input_scheme
+            and scheme.input_symmetric
+            and layer.input_scale is None
+            and layer.input_zero_point is None
+            and layer.azp_adj is None
+            and witness.weight is weight
+            and witness.device == weight.device
+            and weight.dtype == torch.int8
+            and tuple(weight.shape) == (2304, 5120)
+            and weight.stride() == (1, 2304)
+            and layer.weight_scale.device == weight.device
+            and layer.weight_scale.dtype == torch.float32
+            and layer.weight_scale.shape in ((5120,), (5120, 1))
+            and layer.weight_scale.is_contiguous()
+        )
+
+    def apply_prequantized(self, layer, x_q, x_scale):
+        """Consume the admitted shared-expert operand without quantizing again."""
+        if (
+            x_q.ndim != 2 or x_q.shape[1] != 2304 or x_q.dtype != torch.int8
+            or not x_q.is_contiguous() or x_q.device != layer.weight.device
+            or x_scale.shape != (x_q.shape[0], 1) or x_scale.dtype != torch.float32
+            or not x_scale.is_contiguous() or x_scale.device != x_q.device
+        ):
+            raise ValueError("invalid prequantized shared-expert INT8 operand")
+        return torch.ops.vllm.int8_scaled_mm_func.default(
+            x_q, layer.weight, x_scale, layer.weight_scale, torch.bfloat16, None
+        )
+
     def apply(self, layer, x, bias=None):
         if isinstance(x, QuantizedActivation):
             raise TypeError("native CT INT8 does not support QuantizedActivation")
