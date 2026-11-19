@@ -315,10 +315,15 @@ def build():
 
         def local_topk(logits, starts, ends, k):
             rows, width = logits.shape
-            output = torch.full((rows, k), -1, dtype=torch.int32, device=logits.device)
             if not rows or not width:
-                return output
+                return torch.full((rows, k), -1, dtype=torch.int32, device=logits.device)
             top = logits.topk(min(k, width), dim=-1)
+            if logits.is_cuda:
+                from hcu_adapter.kernels.indexer_topk_post_triton import finish_topk
+                fused = finish_topk(top.values, top.indices, starts, ends, k, width)
+                if fused is not None:
+                    return fused
+            output = torch.full((rows, k), -1, dtype=torch.int32, device=logits.device)
             selected = (top.indices - starts[:, None]).to(torch.int32)
             selected.masked_fill_(top.values == -float("inf"), -1)
             ordered = top.indices.masked_fill(top.values == -float("inf"), width).sort(
