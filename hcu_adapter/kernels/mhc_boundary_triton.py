@@ -17,7 +17,7 @@ def supported(residual, fn, scale, base, previous, x, post_in, comb_in,
     if (not all(isinstance(value, torch.Tensor) for value in tensors)
             or torch.is_grad_enabled() or torch.is_autocast_enabled('cuda')
             or torch.get_float32_matmul_precision() != 'highest'
-            or rms_eps != 1.e-6 or pre_eps != 1.e-6 or sinkhorn_eps != 1.e-6
+            or rms_eps not in (1.e-20, 1.e-6) or pre_eps != 1.e-6 or sinkhorn_eps != 1.e-6
             or post_mult != 2. or repeat != 20
             or residual.ndim != 3 or residual.shape[1:] != (4, 5120)
             or not 0 < residual.shape[0] <= 64):
@@ -303,6 +303,7 @@ def _boundary_partials(
 
 @torch.inference_mode()
 def boundary(residual, fn, scale, base, previous, x=None, post_in=None, comb_in=None,
+             rms_eps=1.e-20,
              *, block_k=64, warps=4, post_mult=2.0, eps=1e-6, repeat=20):
     """Return updated residual,post,comb,collapsed BF16 input,and next pre."""
     m, hc, h = residual.shape
@@ -343,7 +344,7 @@ def boundary(residual, fn, scale, base, previous, x=None, post_in=None, comb_in=
     pre = torch.empty((m,4),device=residual.device,dtype=torch.float32)
     post = torch.empty((m,4,1),device=residual.device,dtype=torch.float32)
     comb = torch.empty((m,4,4),device=residual.device,dtype=torch.float32)
-    _mix_reduce[(m,)](mix,square,scratch,scale,base,pre,post,comb,m,1./20480,eps,
+    _mix_reduce[(m,)](mix,square,scratch,scale,base,pre,post,comb,m,1./20480,rms_eps,
         MIX=24,HC=4,NUM_SLICES=slices,SLICES_PAD=triton.next_power_of_2(slices),
         ITERS=repeat,EPS=eps,POST_MULT=post_mult,num_warps=4,enable_fp_fusion=False)
     return updated,post,comb,layer,pre

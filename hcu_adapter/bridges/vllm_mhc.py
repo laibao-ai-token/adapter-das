@@ -327,11 +327,11 @@ def _declare_aiter(mhc, kernels, ir, backend, provider, split_k, mega=None, *, m
                  post_layer_mix: torch.Tensor, comb_res_mix: torch.Tensor,
                  fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor,
                  pre_mix: torch.Tensor | None, norm_weight: torch.Tensor | None,
-                 norm_eps: float
+                 norm_eps: float, rms_eps: float
                  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         updated, post_mix, comb_mix, layer, next_pre = execute(
             run_boundary, residual, fn, hc_scale, hc_base, pre_mix,
-            sublayer_out, post_layer_mix, comb_res_mix)
+            sublayer_out, post_layer_mix, comb_res_mix, rms_eps)
         normed = execute(runtime._norm, layer, norm_weight, norm_eps)
         return updated, post_mix, comb_mix, normed, next_pre
 
@@ -358,7 +358,7 @@ def _declare_aiter(mhc, kernels, ir, backend, provider, split_k, mega=None, *, m
         return torch.empty_like(residual)
 
     def boundary_fake(residual, sublayer_out, post_layer_mix, comb_res_mix,
-                      fn, hc_scale, hc_base, pre_mix, norm_weight, norm_eps):
+                      fn, hc_scale, hc_base, pre_mix, norm_weight, norm_eps, rms_eps):
         m, c, h = residual.shape
         return (torch.empty_like(residual),
                 residual.new_empty((m, c, 1), dtype=torch.float32),
@@ -403,7 +403,7 @@ def _declare_aiter(mhc, kernels, ir, backend, provider, split_k, mega=None, *, m
                         hc_sinkhorn_eps, hc_post_mult_value, sinkhorn_repeat)):
                 return torch.ops.vllm.hcu_adapter_mhc_boundary(
                     residual, sublayer_out, post_layer_mix, comb_res_mix,
-                    fn, hc_scale, hc_base, pre_mix, norm_weight, norm_eps)
+                    fn, hc_scale, hc_base, pre_mix, norm_weight, norm_eps, rms_eps)
             residual = self._maybe_post(residual,sublayer_out,post_layer_mix,comb_res_mix)
             return residual, *torch.ops.vllm.hcu_adapter_mhc_delayed(residual,fn,hc_scale,hc_base,
                 rms_eps,hc_pre_eps,hc_sinkhorn_eps,hc_post_mult_value,sinkhorn_repeat,
