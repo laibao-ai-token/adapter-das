@@ -313,15 +313,18 @@ def build():
                     ~visible, -float("inf"))
             return logits
 
-        def local_topk(logits, starts, ends, k):
+        def local_topk(logits, starts, ends, k, *, valid_lengths=None):
             rows, width = logits.shape
             if not rows or not width:
                 return torch.full((rows, k), -1, dtype=torch.int32, device=logits.device)
             if logits.is_cuda:
                 from hcu_adapter.kernels.indexer_topk_lightop import select_topk
-                native = select_topk(logits, starts, ends, k)
+                native = select_topk(logits, starts, ends, k, valid_lengths=valid_lengths)
                 if native is not None:
                     return native
+            if valid_lengths is not None:
+                columns = torch.arange(width, device=logits.device)
+                logits.masked_fill_(columns[None, :] >= valid_lengths[:, None], -float('inf'))
             top = logits.topk(min(k, width), dim=-1)
             if logits.is_cuda:
                 from hcu_adapter.kernels.indexer_topk_post_triton import finish_topk
@@ -360,7 +363,7 @@ def build():
                 helper = inner
             return helper
 
-        def _select(logits, starts, ends, out, candidates, block_size, write):
+        def _select(logits, starts, ends, out, candidates, block_size, write, *, bounded=False):
             if candidates is not None:
                 helper = _collaborator(
                     "candidate_select" if write else "candidate_mask")
@@ -379,7 +382,12 @@ def build():
                         helper(logits, starts, ends, candidates.shape[1],
                                block_size, candidates)
                     else:
-                        helper(logits, starts, ends, candidates, block_size)
+                        masked = False
+                        if bounded and helper is apply_candidate_mask:
+                            from hcu_adapter.kernels.indexer_live_mask_triton import mask_decode_candidates
+                            masked = mask_decode_candidates(logits, ends, candidates, block_size)
+                        if not masked:
+                            helper(logits, starts, ends, candidates, block_size)
                 except AssertionError as error:
                     # Backstop for a CUDA-only helper we could not identify by
                     # unwrapping. Keep the original text so a genuine assertion
@@ -387,7 +395,8 @@ def build():
                     raise V41IndexerError(
                         "V41 candidate-block selection failed on a non-CUDA "
                         f"tensor; the helper is likely CUDA-only ({error})") from error
-            out.copy_(local_topk(logits, starts, ends, out.shape[1]))
+            out.copy_(local_topk(logits, starts, ends, out.shape[1],
+                                 valid_lengths=ends if bounded else None))
 
         @eager_break_during_capture
         def indexer(hidden_states: torch.Tensor, prefix: str, cache: torch.Tensor,
