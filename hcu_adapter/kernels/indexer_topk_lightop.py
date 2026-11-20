@@ -19,7 +19,7 @@ from .indexer_topk_post_triton import _supported_device
 def _topk_native_scores(X, Scores, Lengths, Offsets,
                         WIDTH: tl.constexpr, PITCH: tl.constexpr,
                         XROW: tl.constexpr, BLOCK: tl.constexpr):
-    row, block = tl.program_id(0), tl.program_id(1)
+    row, block = tl.program_id(0).to(tl.int64), tl.program_id(1)
     col = block * BLOCK + tl.arange(0, BLOCK)
     value = tl.load(X + row * XROW + col, col < WIDTH, other=-float('inf'))
     bits = value.to(tl.uint32, bitcast=True)
@@ -41,7 +41,7 @@ def _topk_native_scores(X, Scores, Lengths, Offsets,
 def _topk_native_output(X, Indices, Starts, Ends, Out,
                         WIDTH: tl.constexpr, XROW: tl.constexpr,
                         K: tl.constexpr):
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     lane = tl.arange(0, K)
     idx = tl.load(Indices + row * K + lane)
     value = tl.load(X + row * XROW + idx, (idx >= 0) & (idx < WIDTH), other=-float('inf'))
@@ -68,7 +68,7 @@ def select_topk(logits, starts, ends, k):
     """Native Top512 over the same global score domain; None when unsupported."""
     if (torch.version.hip is None or not logits.is_cuda or logits.ndim != 2
             or logits.dtype != torch.float32 or logits.stride(1) != 1
-            or k != 512 or not 0 < logits.shape[0] <= 64
+            or k != 512 or logits.shape[0] <= 0
             or not 512 <= logits.shape[1] <= 32768
             or logits.stride(0) < logits.shape[1]
             or starts.shape != logits.shape[:1] or ends.shape != starts.shape

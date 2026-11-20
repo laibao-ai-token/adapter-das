@@ -36,7 +36,7 @@ if triton is not None:
     @triton.jit
     def _mask_copy_inverse_rope(Result, Output, Main, Extra, Positions, CS,
                                 HEADS: tl.constexpr, HAS_EXTRA: tl.constexpr):
-        row = tl.program_id(0)
+        row = tl.program_id(0).to(tl.int64)
         head = tl.program_id(1)
         base = (row * HEADS + head) * 512
         count = tl.load(Main + row)
@@ -80,9 +80,9 @@ def qualify_inverse_rope(device):
         if torch.cuda.is_current_stream_capturing():
             return False
         try:
-            angle = torch.arange(64 * 32, device=device, dtype=torch.float32).reshape(64, 32) / 61
+            angle = torch.arange(256 * 32, device=device, dtype=torch.float32).reshape(256, 32) / 61
             cos_sin = torch.cat((angle.cos(), angle.sin()), dim=1)
-            for rows, heads in ((1, 64), (8, 128), (48, 64), (64, 128)):
+            for rows, heads in ((1, 64), (8, 128), (48, 64), (64, 128), (256, 64), (256, 128)):
                 # Include every BF16 encoding at the largest shape.
                 bits = torch.arange(rows * heads * 512, device=device, dtype=torch.int32)
                 result = bits.to(torch.int16).view(torch.bfloat16).reshape(rows, heads, 512)
@@ -92,7 +92,7 @@ def qualify_inverse_rope(device):
                     main = row % 3 - 1
                     extra = row % 2 if with_extra else None
                     live = main > 0 if extra is None else main + extra > 0
-                    positions = (63 - row).to(torch.int64) if with_extra else 63 - row
+                    positions = (255 - row).to(torch.int64) if with_extra else 255 - row
                     expected = torch.where(live[:, None, None], result, 0.)
                     entries[1](expected, positions, cos_sin, 64)
                     _mask_copy_inverse_rope[(rows, heads)](
@@ -113,7 +113,7 @@ def try_mask_copy_rope(result, output, main_lens, extra_lens, positions, cos_sin
     if triton is None or positions is None or cos_sin is None:
         return False
     tensors = (result, output, main_lens, positions, cos_sin) + (() if extra_lens is None else (extra_lens,))
-    if (result.ndim != 3 or not 0 < result.shape[0] <= 64
+    if (result.ndim != 3 or not 0 < result.shape[0] <= 256
             or result.shape[1:] not in ((64, 512), (128, 512))
             or output is None or output.shape != result.shape
             or result.dtype != torch.bfloat16 or output.dtype != torch.bfloat16

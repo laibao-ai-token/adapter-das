@@ -14,7 +14,7 @@ except ImportError:
 def native_query_and_sink(q, attn_sink, native_heads):
     """Native full-head contiguous inputs already have the required layout."""
     rows, heads, _ = q.shape
-    admitted = (not q.is_cuda or (0 < rows <= 64 and getattr(
+    admitted = (not q.is_cuda or (rows > 0 and getattr(
         torch.cuda.get_device_properties(q.device), 'gcnArchName', '').split(':')[0] == 'gfx938'))
     if (admitted and heads == native_heads and q.is_contiguous()
             and (not q.is_cuda or q.data_ptr() % 256 == 0)):
@@ -39,7 +39,7 @@ if triton is not None:
     def _mask_copy_native_mla(Result, Output, Main, Extra,
                               WIDTH: tl.constexpr, HAS_EXTRA: tl.constexpr,
                               BLOCK: tl.constexpr):
-        row = tl.program_id(0)
+        row = tl.program_id(0).to(tl.int64)
         col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
         count = tl.load(Main + row)
         if HAS_EXTRA:
@@ -50,7 +50,7 @@ if triton is not None:
 
 def try_mask_copy(result, output, main_lens, extra_lens):
     tensors = (result, output, main_lens) + (() if extra_lens is None else (extra_lens,))
-    if (triton is None or result.ndim != 3 or not 0 < result.shape[0] <= 64
+    if (triton is None or result.ndim != 3 or result.shape[0] <= 0
             or result.shape[1:] not in ((64, 512), (128, 512))
             or output.shape != result.shape or result.dtype != torch.bfloat16
             or output.dtype != torch.bfloat16

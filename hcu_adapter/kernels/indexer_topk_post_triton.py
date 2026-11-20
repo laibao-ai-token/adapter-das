@@ -15,7 +15,7 @@ import triton.language as tl
 @triton.jit
 def _indexer_topk_post(Values, Indices, Starts, Ends, Out,
                         WIDTH: tl.constexpr, K: tl.constexpr):
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     col = tl.arange(0, K)
     start = tl.load(Starts + row)
     end = tl.load(Ends + row)
@@ -33,15 +33,14 @@ def _indexer_topk_post(Values, Indices, Starts, Ends, Out,
 @lru_cache(maxsize=None)
 def _supported_device(index):
     p = torch.cuda.get_device_properties(index)
-    return (getattr(p, 'gcnArchName', '').split(':')[0] == 'gfx938'
-            and p.multi_processor_count == 64)
+    return getattr(p, 'gcnArchName', '').split(':')[0] == 'gfx938'
 
 
 def finish_topk(values, indices, starts, ends, k, width):
     """Return exact existing postprocessing, or None outside the tested ABI."""
     if (torch.version.hip is None or not values.is_cuda or values.ndim != 2
             or k != 512 or not 512 <= width < 2**31
-            or not 0 < values.shape[0] <= 64 or values.shape[1] != k
+            or values.shape[0] <= 0 or values.shape[1] != k
             or values.dtype != torch.float32 or not values.is_contiguous()
             or indices.shape != values.shape or indices.dtype != torch.int64
             or not indices.is_contiguous()
