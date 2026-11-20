@@ -56,6 +56,7 @@ class _Publication:
     delayed_fusion_requested: bool
     provider: object = None
     mega_provider: object = None
+    mega_runtime: object = None
 
 
 def selected_mode() -> str:
@@ -178,6 +179,38 @@ def require_healthy() -> None:
         _refuse('mHC registration health check failed', error)
 
 
+def _check_dispatch_provider(provider) -> None:
+    if _failure is not None:
+        raise MhcCompatibilityError(_failure)
+    if provider is not None:
+        try:
+            provider.require_healthy()
+        except Exception as error:
+            _refuse('mHC provider changed before dispatch; start a fresh process', error)
+
+
+def check_graph_providers() -> None:
+    """Check published providers before a Worker can replay captured work."""
+    publication = _publication
+    if publication is not None:
+        _check_dispatch_provider(publication.provider)
+        _check_dispatch_provider(publication.mega_provider)
+
+
+def prepare_weight_mutation(vllm_config):
+    """Protect cached Fn against writes that bypass PyTorch's version counter."""
+    publication = _publication
+    if publication is None or publication.mega_runtime is None:
+        return
+    runtime = publication.mega_runtime
+    if runtime.repack_count and not vllm_config.model_config.enforce_eager:
+        # The upstream update APIs do not invalidate captured graphs, which
+        # may still hold the old packed Fn even if the Python cache is cleared.
+        raise MhcCompatibilityError(
+            'mHC Mega weight updates after Graph warmup require a fresh process')
+    runtime.invalidate_packed_weights()
+
+
 def _require_parameters(fn, names, defaults):
     parameters = inspect.signature(fn).parameters
     if tuple(parameters) != names or any(parameters[k].default != v for k, v in defaults.items()):
@@ -193,6 +226,8 @@ def _declare(mhc, kernels, ir):
             rms_eps: float, hc_pre_eps: float, hc_sinkhorn_eps: float, hc_post_mult_value: float,
             sinkhorn_repeat: int, n_splits: int = 1, norm_weight: torch.Tensor | None = None,
             norm_eps: float = 0.0) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if _failure is not None:
+            raise MhcCompatibilityError(_failure)
         post, comb, layer = kernels.mhc_pre_torch(residual, fn, hc_scale, hc_base,
             rms_eps, hc_pre_eps, hc_sinkhorn_eps, hc_post_mult_value, sinkhorn_repeat, n_splits)
         normed = layer
@@ -206,6 +241,8 @@ def _declare(mhc, kernels, ir):
               sinkhorn_repeat: int, n_splits: int = 1, tile_n: int = 1,
               norm_weight: torch.Tensor | None = None, norm_eps: float = 0.0
               ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if _failure is not None:
+            raise MhcCompatibilityError(_failure)
         updated = kernels.mhc_post_torch(x, residual, post_layer_mix, comb_res_mix)
         rest = pre(updated, fn, hc_scale, hc_base, rms_eps, hc_pre_eps,
                    hc_sinkhorn_eps, hc_post_mult_value, sinkhorn_repeat, n_splits,
@@ -242,13 +279,14 @@ def _declare(mhc, kernels, ir):
 
 
 
-def _declare_aiter(mhc, kernels, ir, backend, provider, split_k, mega=None):
+def _declare_aiter(mhc, kernels, ir, backend, provider, split_k, mega=None, *, mega_provider=None):
     global torch
     torch = import_module('torch')
     runtime = backend.MhcAiterRuntime(provider, kernels, ir.ops.rms_norm,
         torch.ops.vllm.mhc_pre_mix_triton, torch.ops.vllm.hc_collapse_triton, split_k)
 
     def execute(function, *args):
+        _check_dispatch_provider(provider)
         try:
             return function(*args)
         except BaseException as error:
@@ -324,6 +362,8 @@ def _declare_aiter(mhc, kernels, ir, backend, provider, split_k, mega=None):
                         hc_sinkhorn_eps, hc_post_mult_value, sinkhorn_repeat, pre_mix=None,
                         x=None, norm_weight=None, norm_eps=1e-6, sublayer_out=None,
                         post_layer_mix=None, comb_res_mix=None):
+            if _failure is not None:
+                raise MhcCompatibilityError(_failure)
             if mega is not None and mega.supported(
                     residual, fn, hc_scale, hc_base, pre_mix, x, norm_weight,
                     sublayer_out, post_layer_mix, comb_res_mix, sinkhorn_repeat):
@@ -331,6 +371,8 @@ def _declare_aiter(mhc, kernels, ir, backend, provider, split_k, mega=None):
                     residual, fn, hc_scale, hc_base, rms_eps, hc_pre_eps,
                     hc_sinkhorn_eps, hc_post_mult_value, sinkhorn_repeat,
                     pre_mix, sublayer_out, post_layer_mix, comb_res_mix)
+            if mega is not None:
+                _check_dispatch_provider(mega_provider)
             residual = self._maybe_post(residual,sublayer_out,post_layer_mix,comb_res_mix)
             return residual, *torch.ops.vllm.hcu_adapter_mhc_delayed(residual,fn,hc_scale,hc_base,
                 rms_eps,hc_pre_eps,hc_sinkhorn_eps,hc_post_mult_value,sinkhorn_repeat,
@@ -345,7 +387,7 @@ def _declare_aiter(mhc, kernels, ir, backend, provider, split_k, mega=None):
             runtime)
 
 
-def _declare_mega(runtime):
+def _declare_mega(runtime, mega_provider=None):
     def seam(residual: torch.Tensor, fn: torch.Tensor,
              hc_scale: torch.Tensor, hc_base: torch.Tensor,
              rms_eps: float, hc_pre_eps: float, hc_sinkhorn_eps: float,
@@ -353,6 +395,7 @@ def _declare_mega(runtime):
              pre_mix: torch.Tensor, sublayer_out: torch.Tensor,
              post_layer_mix: torch.Tensor, comb_res_mix: torch.Tensor
              ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        _check_dispatch_provider(mega_provider)
         if not runtime.supported(residual, fn, hc_scale, hc_base, pre_mix, None, None,
                                  sublayer_out, post_layer_mix, comb_res_mix, sinkhorn_repeat):
             raise MhcCompatibilityError('mHC mega seam called outside its supported contract')
@@ -469,7 +512,7 @@ def install() -> bool:
         if aiter_mode:
             backend = import_module('hcu_adapter.kernels.mhc_aiter')
             declarations, runtime = _declare_aiter(
-                mhc, kernels, ir, backend, provider, split_k, mega)
+                mhc, kernels, ir, backend, provider, split_k, mega, mega_provider=mega_provider)
             names = ('hcu_adapter_mhc_pre','hcu_adapter_mhc_fused',
                      'hcu_adapter_mhc_delayed','hcu_adapter_mhc_post')
         else:
@@ -496,7 +539,7 @@ def install() -> bool:
                 if function is not None:
                     register(name, function, mutates_args=[], fake_impl=fake)
             if mega is not None:
-                mega_function, mega_fake = _declare_mega(mega)
+                mega_function, mega_fake = _declare_mega(mega, mega_provider)
                 register('hcu_adapter_mhc_mega_seam', mega_function,
                          mutates_args=[], fake_impl=mega_fake)
             if (delayed_fusion_requested and provider.project is not None
@@ -525,7 +568,7 @@ def install() -> bool:
             envs.environment_variables[COMPILE_FACTOR] = factor_getter
             _publication = _Publication(os.getpid(), owners,
                 tuple(item[2] for item in declarations), envs, factor_getter, factor,
-                mode, split_k, delayed_fusion_requested, provider, mega_provider)
+                mode, split_k, delayed_fusion_requested, provider, mega_provider, mega)
             _check_publication(_publication)
             detail = (f'candidate {detected.architecture}/v0.33 AITER HIP mHC '
                       f'pre/delayed/fused/post via public OOT; split-K={split_k}; '

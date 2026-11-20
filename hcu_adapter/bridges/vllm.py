@@ -305,13 +305,27 @@ def _configure_indexer_kv_dtype(vllm_config) -> None:
         return
     for capability in sorted(_FP4_INDEXER_CAPABILITIES):
         require_extension_healthy(capability)
+    cache = vllm_config.cache_config
+    # The parser's default 16 is provisional. DSV4.1 ROCm attention admits
+    # 64/128, both with valid FP4 geometry for ratios 1/2. Core can still
+    # choose its common backend block size after loading the model.
+    provisional = (getattr(cache, "user_specified_block_size", None) is False
+                   and cache.block_size == getattr(cache, "DEFAULT_BLOCK_SIZE", None))
+    block_size = 64 if provisional else None
     try:
-        plan = validate_config(vllm_config)
+        plan = validate_config(vllm_config, block_size=block_size)
     except Fp4AdmissionError as exc:
         LOG.debug("Keeping DeepSeek V4.1 indexer_kv_dtype=auto: %s", exc)
         return
     if plan is None:
         return
+    from hcu_adapter.v41_fp8_indexer import fp4_reader_ready
+
+    if not fp4_reader_ready():
+        LOG.info("Keeping DeepSeek V4.1 indexer_kv_dtype=auto: FP4 reader unavailable")
+        return
+    if provisional:
+        cache.block_size = plan.manager_block
     vllm_config.attention_config.indexer_kv_dtype = "mxfp4"
     LOG.info(
         "HCU DeepSeek V4.1 indexer_kv_dtype auto -> mxfp4 "

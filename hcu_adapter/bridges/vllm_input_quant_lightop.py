@@ -35,8 +35,8 @@ Numerical difference (measured on several GPUs class, single card, 512x1024 bf16
   differ, at most 1 ulp (max |delta| = one fp8 step, p99 relative error 0).
 * all-zero rows: upstream returns the clamp floor `1/(448*512)` as the scale,
   LightOp returns 0. Both quantize to 0 and both dequantize to 0.
-* rows whose amax is below the clamp floor: the scales differ by construction
-  (upstream clamps up to the floor, LightOp uses `amax/448`). Set
+* rows whose amax is below `FP8_MAX * scale_floor`: upstream clamps the
+  scale to its floor, while LightOp uses the raw `amax / FP8_MAX`. Set
   `HCU_LIGHTOP_FP8_AMAX_DIAG=1` to count those rows; the diagnostic is off by
   default and log-once, because it costs one extra reduction per call.
 
@@ -75,7 +75,7 @@ _LOCK = threading.RLock()
 _COUNTS: dict[str, int] = {}
 _LOGGED: set[str] = set()
 _ATEXIT_ARMED = False
-_DIAG = {"calls": 0, "rows": 0, "tiny": 0, "floor": 0.0}
+_DIAG = {"calls": 0, "rows": 0, "tiny": 0, "floor": 0.0, "amax_floor": 0.0}
 
 
 def _bump(reason: str) -> None:
@@ -109,30 +109,31 @@ def _lightop_fn():
     return per_token_quant_fp8
 
 
-def _diag_rows(x: torch.Tensor, floor: float) -> None:
+def _diag_rows(x: torch.Tensor, scale_floor: float, amax_floor: float) -> None:
     """Count rows below the upstream clamp floor (diagnostic gate only)."""
     with torch.no_grad():
         amax = x.detach().abs().amax(dim=-1)
-        tiny = int((amax < floor).sum().item())
+        tiny = int((amax < amax_floor).sum().item())
     with _LOCK:
         _DIAG["calls"] += 1
         _DIAG["rows"] += int(x.shape[0])
         _DIAG["tiny"] += tiny
-        _DIAG["floor"] = floor
+        _DIAG["floor"] = scale_floor
+        _DIAG["amax_floor"] = amax_floor
 
 
 def _flush() -> None:
     LOG.warning("HCU LightOp per-token FP8 counters: %s", _counts_line())
     with _LOCK:
-        calls, rows, tiny, floor = (
-            _DIAG["calls"], _DIAG["rows"], _DIAG["tiny"], _DIAG["floor"],
+        calls, rows, tiny, scale_floor, amax_floor = (
+            _DIAG["calls"], _DIAG["rows"], _DIAG["tiny"], _DIAG["floor"], _DIAG["amax_floor"],
         )
     if calls:
         share = (100.0 * tiny / rows) if rows else 0.0
         LOG.warning(
             "HCU LightOp per-token FP8 amax diag: calls=%d rows=%d "
-            "rows_below_floor=%d (%.4f%%) floor=%.6e",
-            calls, rows, tiny, share, floor,
+            "rows_below_floor=%d (%.4f%%) scale_floor=%.6e amax_floor=%.6e",
+            calls, rows, tiny, share, scale_floor, amax_floor,
         )
 
 
@@ -174,7 +175,9 @@ def _wrap(module, original):
     """Build the replacement; closes over upstream enum/dtype/floor values."""
     per_token = module.GroupShape.PER_TOKEN
     fp8_dtype = module._FP8_DTYPE
-    floor = float(getattr(module, "_FP8_MIN_SCALING_FACTOR", 1.0 / (448.0 * 512.0)))
+    fp8_max = float(getattr(module, "_FP8_MAX", torch.finfo(fp8_dtype).max))
+    scale_floor = float(getattr(module, "_FP8_MIN_SCALING_FACTOR", 1.0 / (fp8_max * 512.0)))
+    amax_floor = fp8_max * scale_floor
     diag = os.environ.get(_AMAX_DIAG_ENV, "") not in ("", "0")
 
     @functools.wraps(original)
@@ -199,7 +202,7 @@ def _wrap(module, original):
             return original(self, x, scale, scale_ub, use_triton)
 
         if diag:
-            _diag_rows(x, floor)
+            _diag_rows(x, scale_floor, amax_floor)
         try:
             quantized, scales = _lightop_fn()(x, dtype=fp8_dtype)
         except Exception:  # noqa: BLE001 - a vendor kernel must never break serving

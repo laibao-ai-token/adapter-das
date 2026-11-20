@@ -166,6 +166,11 @@ REGISTRY = {
         "hosts": ("vllm",),
         "about": "vLLM 0.33 V4.1 CT W4A8 config registration: native or stock; startup only; kill vllm_ct_w4a8 wins",
     },
+    "HCU_DSV41_W4A8_MOE_EXPECTED_M": {
+        "env": "HCU_DSV41_W4A8_MOE_EXPECTED_M", "default": "0",
+        "hosts": ("vllm",),
+        "about": "Enable the small-batch masked GEMM hint for eligible V4.1 W4A8 experts; startup only",
+    },
     "HCU_VLLM_PCP_IMPL": {
         "env": "HCU_VLLM_PCP_IMPL", "default": "stock",
         "hosts": ("vllm",),

@@ -82,7 +82,7 @@ def _graph_capture_allowed(cfg):
     return bool(resolve_graph_capture_allowed()(cfg))
 
 
-def validate_config(cfg):
+def validate_config(cfg, *, block_size=None):
     """Reject unsupported deployments before native constructors allocate."""
     if not selected():
         return None
@@ -102,7 +102,7 @@ def validate_config(cfg):
     if not getattr(hf, 'kv_source_layer_ids', None) or not getattr(
             hf, 'index_source_layer_ids', None):
         errors.append('kv_source_layer_ids and index_source_layer_ids required')
-    block = cfg.cache_config.block_size
+    block = cfg.cache_config.block_size if block_size is None else block_size
     if not active:
         errors.append('at least one compressed indexer ratio is required')
     # The allocator owns ``block_size // ratio`` records per positive-ratio

@@ -11,7 +11,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from hcu_adapter import fp4_indexer, hcu_config
+from hcu_adapter import fp4_indexer, hcu_config, v41_fp8_indexer
 from hcu_adapter.bridges import vllm as bridge
 from hcu_adapter.extensions import ExtensionReport, ExtensionStatus
 
@@ -59,6 +59,7 @@ def isolated(monkeypatch):
     for name in ("HCU_VLLM_FP4_INDEXER_IMPL", "HCU_VLLM_FP4_PACKER_IMPL",
                  "HCU_VLLM_SPARSE_INDEXER_IMPL", "HCU_VLLM_PCP_IMPL", "HCU_DISABLE_OPS"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setitem(v41_fp8_indexer._resolvers, "fp4_reader_ready", lambda: True)
     publish(reports())
 
 
@@ -248,6 +249,7 @@ def test_real_attention_config_hash_and_serialization_use_effective_dtype():
 def configure_child(queue, cfg):
     # Forked reports must be reactivated locally before choosing a new default.
     bridge._RUNTIME_ACTIONS = bridge.ProcessLocalActions()
+    v41_fp8_indexer._resolvers["fp4_reader_ready"] = lambda: True
     publish(reports())
     bridge._configure_indexer_kv_dtype(cfg)
     queue.put(cfg.attention_config.indexer_kv_dtype)

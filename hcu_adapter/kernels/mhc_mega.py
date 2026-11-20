@@ -191,6 +191,10 @@ class MhcMegaRuntime:
         event.record(stream)
         return value, event, stream.cuda_stream
 
+    def invalidate_packed_weights(self):
+        """Discard derived weights before a supported host weight mutation."""
+        self._packed.clear()
+
     def _prepare(self, fn, stream):
         try:
             version = fn._version
