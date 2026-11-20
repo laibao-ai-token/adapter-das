@@ -6,6 +6,7 @@ The BF16 normalized tensor remains the public value. The extra INT8 codes and
 FP32 scales live only inside the owned decoder call, matched by tensor identity.
 No tensor attributes, process-global activation cache or native rebinding.
 """
+import math
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -61,9 +62,10 @@ def supported(x, weight, eps):
         isinstance(x, torch.Tensor) and isinstance(weight, torch.Tensor)
         and x.device.type == 'cuda' and weight.device == x.device
         and x.dtype == weight.dtype == torch.bfloat16
-        and x.ndim == 2 and 0 < x.shape[0] <= 64 and x.shape[1] == 5120
+        and x.ndim == 2 and x.shape[0] > 0 and x.shape[1] == 5120
         and tuple(weight.shape) == (5120,) and x.is_contiguous()
         and weight.is_contiguous() and x.data_ptr() % 16 == 0
-        and weight.data_ptr() % 16 == 0 and eps == 1.e-20
+        and weight.data_ptr() % 16 == 0
+        and isinstance(eps, (int, float)) and math.isfinite(eps) and eps >= 0
         and not torch.is_grad_enabled() and not torch.is_autocast_enabled('cuda')
     )

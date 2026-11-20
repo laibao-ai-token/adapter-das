@@ -412,6 +412,25 @@ class MhcAiterRuntime:
         normed = self._norm(layer, norm_weight, norm_eps)
         return post, comb, normed, next_pre
 
+    def boundary(self, residual, fn, scale, base, previous, x, post_in, comb_in,
+                 rms_eps, pre_eps, sinkhorn_eps, post_mult, repeat):
+        """Keep native projection arithmetic when its reduction is unsplit.
+
+        The combined partial-reduction kernel matches the split projection
+        contract. An unsplit native projection uses a different sum order;
+        retain that projection and the optimized Post for those calls.
+        Neither route limits the number of token rows.
+        """
+        splits = select_splits(residual.shape[0], residual.shape[1],
+                               residual.shape[2], self.split_k)
+        if splits == 1:
+            updated = self.post(x, residual, post_in, comb_in)
+            return updated, *self.delayed(updated, fn, scale, base, rms_eps,
+                pre_eps, sinkhorn_eps, post_mult, repeat, pre_mix=previous)
+        from .mhc_boundary_triton import boundary
+        return boundary(residual, fn, scale, base, previous, x, post_in, comb_in,
+                        rms_eps, eps=pre_eps, post_mult=post_mult, repeat=repeat)
+
     def fused(self, x, residual, post_layer_mix, comb_res_mix, fn, hc_scale,
               hc_base, rms_eps, hc_pre_eps, hc_sinkhorn_eps, hc_post_mult_value,
               sinkhorn_repeat, n_splits=1, tile_n=1, norm_weight=None, norm_eps=0.0):

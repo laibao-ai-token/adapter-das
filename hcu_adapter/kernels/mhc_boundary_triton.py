@@ -5,6 +5,8 @@ Adapted from SGLang mhc_boundary_hip.py (Apache-2.0), source SHA256
 58ef20e278484a8d8b47f522aa742b8b1757c0fe5bf3e574e100f1bdd2b6f602. Preserve this serving implementation's distinct Post FMA
 and BF16 storage boundaries; no Core or provider symbols are changed.
 """
+import math
+
 import torch
 import triton
 import triton.language as tl
@@ -17,10 +19,15 @@ def supported(residual, fn, scale, base, previous, x, post_in, comb_in,
     if (not all(isinstance(value, torch.Tensor) for value in tensors)
             or torch.is_grad_enabled() or torch.is_autocast_enabled('cuda')
             or torch.get_float32_matmul_precision() != 'highest'
-            or rms_eps not in (1.e-20, 1.e-6) or pre_eps != 1.e-6 or sinkhorn_eps != 1.e-6
-            or post_mult != 2. or repeat != 20
+            # This kernel shares EPS between pre and Sinkhorn; their equality
+            # is an arithmetic constraint, independent of model defaults.
+            or pre_eps != sinkhorn_eps
+            or not all(isinstance(v, (int, float)) and math.isfinite(v)
+                       for v in (rms_eps, pre_eps, sinkhorn_eps, post_mult))
+            or rms_eps < 0 or pre_eps <= 0
+            or type(repeat) is not int or repeat < 1
             or residual.ndim != 3 or residual.shape[1:] != (4, 5120)
-            or not 0 < residual.shape[0] <= 64):
+            or residual.shape[0] <= 0):
         return False
     m = residual.shape[0]
     if (residual.dtype != torch.bfloat16 or x.dtype != torch.bfloat16
@@ -39,7 +46,7 @@ def supported(residual, fn, scale, base, previous, x, post_in, comb_in,
                and not value.is_neg() and not value.is_conj() for value in tensors):
         return False
     props = torch.cuda.get_device_properties(residual.device)
-    return props.gcnArchName.split(':')[0] == 'gfx938' and props.multi_processor_count == 64
+    return props.gcnArchName.split(':')[0] == 'gfx938'
 
 
 @triton.jit
@@ -308,13 +315,13 @@ def boundary(residual, fn, scale, base, previous, x=None, post_in=None, comb_in=
     """Return updated residual,post,comb,collapsed BF16 input,and next pre."""
     m, hc, h = residual.shape
     assert residual.is_cuda and residual.is_contiguous() and residual.dtype == torch.bfloat16
-    assert hc == 4 and h == 5120 and 0 < m <= 64
+    assert hc == 4 and h == 5120 and m > 0
     assert tuple(fn.shape) == (24, 20480) and fn.dtype == torch.float32 and fn.is_contiguous()
     assert scale.shape == (3,) and base.shape == (24,) and scale.dtype == base.dtype == torch.float32
     assert block_k in (64, 128, 256) and warps in (2, 4)
     assert torch.get_float32_matmul_precision() == 'highest' and not torch.is_autocast_enabled('cuda')
     props = torch.cuda.get_device_properties(residual.device)
-    assert props.gcnArchName.split(':')[0] == 'gfx938' and props.multi_processor_count == 64
+    assert props.gcnArchName.split(':')[0] == 'gfx938'
     has_post = x is not None
     if has_post:
         assert x.shape == (m,h) and x.dtype == torch.bfloat16 and x.is_contiguous()

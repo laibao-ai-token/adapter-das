@@ -13,7 +13,7 @@ def supported(x, residual, post, comb):
     # Keep autocast callers on that reference instead of fixed FP32 FMA.
     if (not all(isinstance(t, torch.Tensor) for t in tensors)
             or residual.ndim != 3 or residual.shape[1:] != (4, 5120)
-            or not 0 < residual.shape[0] <= 1024
+            or residual.shape[0] <= 0
             or x.shape != (residual.shape[0], 5120)
             or post.shape not in ((residual.shape[0], 4), (residual.shape[0], 4, 1))
             or comb.shape != (residual.shape[0], 4, 4)
@@ -28,7 +28,7 @@ def supported(x, residual, post, comb):
 
 @triton.jit
 def _mhc_post_5120(X, R, P, C, O, BLOCK: tl.constexpr):
-    token = tl.program_id(0)
+    token = tl.program_id(0).to(tl.int64)
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     head = tl.arange(0, 4)[:, None]
     r0 = tl.load(R + token * 20480 + col, col < 5120, other=0).to(tl.float32)[None, :]
