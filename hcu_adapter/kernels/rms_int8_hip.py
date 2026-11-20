@@ -3,8 +3,9 @@
 """Native RMS/BF16-storage/dynamic-INT8 fusion for admitted gfx938 W4A8 calls.
 
 The reduction and quantization sequence follow vLLM layernorm_kernels.cu and
-quantization/w8a8/int8/scaled_quant.cu (Apache-2.0). The adapter owns this kernel; native weight loading and selected GEMM stay
-unchanged. The model prepares the extension before any graph capture.
+quantization/w8a8/int8/scaled_quant.cu (Apache-2.0). The adapter owns this kernel;
+native weight loading and selected GEMM stay unchanged. The model prepares the
+extension before any graph capture.
 """
 from functools import lru_cache
 
@@ -50,7 +51,9 @@ __global__ __launch_bounds__(1024) void exact_rms_int8_kernel(
     #pragma unroll
     for(int j=0;j<8;++j) {
         // Keep the native BF16 tensor boundary before INT8 range reduction.
-        rounded.value[j]=BF16(float(src.value[j])*inverse_rms*float(weight.value[j]));
+        // Keep the native arithmetic NaN sign as well as finite RNE bits.
+        const float normalized=float(src.value[j])*inverse_rms*float(weight.value[j]);
+        rounded.value[j].x=__bfloat16_as_ushort(__float2bfloat16(normalized));
         local_max=fmaxf(local_max,fabsf(float(rounded.value[j])));
     }
     *reinterpret_cast<BF16x8*>(y+offset+col)=rounded;
