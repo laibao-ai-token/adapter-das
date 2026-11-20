@@ -35,6 +35,9 @@ class Worker(OfficialWorker):
         with set_current_vllm_config(self.vllm_config):
             _check_optimized_owners()
             dispatch_post_model_load(self, load_dummy_weights=load_dummy_weights)
+            from hcu_adapter.bridges.vllm_flashmla_decode import qualify_after_model_load
+
+            qualify_after_model_load(self.vllm_config, self.device)
 
     def _check_graph_dispatch(self) -> None:
         if not self.vllm_config.model_config.enforce_eager:

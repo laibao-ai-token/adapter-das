@@ -127,6 +127,22 @@ def require_healthy():
             _refuse('FlashMLA decode publication/policy drift; start a fresh process', error)
 
 
+def qualify_after_model_load(config, device):
+    """Preflight the installed provider on the V4.1 worker before Graph capture."""
+    if _publication is None or _publication.pid != os.getpid():
+        return
+    architectures = getattr(config.model_config, 'architectures', ()) or ()
+    hf_config = getattr(config.model_config, 'hf_config', None)
+    if (not any(name.startswith('DeepseekV41') for name in architectures)
+            and getattr(hf_config, 'model_type', None) not in ('deepseek_v41', 'deepseek_v41_text')):
+        return
+    from hcu_adapter.kernels.mla_decode_rope_triton import qualify_inverse_rope
+    from hcu_adapter.kernels.mla_native_plan_triton import qualify_native_plan
+
+    qualify_native_plan(device)
+    qualify_inverse_rope(device)
+
+
 def install():
     global _publication
     if _failure is not None:

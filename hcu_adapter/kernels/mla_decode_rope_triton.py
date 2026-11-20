@@ -2,9 +2,11 @@
 """Native BF16 inverse RoPE together with empty-row writeback."""
 from __future__ import annotations
 
+import logging
+import os
+
 import torch
-import hashlib
-from pathlib import Path
+from hcu_adapter.operator_contracts import supports_operator_contract
 
 try:
     import triton
@@ -12,19 +14,22 @@ try:
 except ImportError:
     triton = None
 
-_NATIVE_SOURCE_SHA256 = '002a018af1965eb13b2ffb9fd527bb0f2860d2a4b4eee352a0979c2c9529297c'
-_native_contract = None
+_LOG = logging.getLogger('vllm.hcu_adapter')
+_qualified_inverse_rope = set()
 
 
-def _native_matches():
-    global _native_contract
+def _native_entries(native):
+    return (getattr(native, '_inverse_rope_gptj_kernel', None),
+            getattr(native, 'rocm_inverse_rope_rows_', None))
+
+
+def _native_matches(device):
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as native
-    if _native_contract is None:
-        if hashlib.sha256(Path(native.__file__).read_bytes()).hexdigest() != _NATIVE_SOURCE_SHA256:
-            _native_contract = ()
-        else:
-            _native_contract = (native._inverse_rope_gptj_kernel, native.rocm_inverse_rope_rows_)
-    return _native_contract == (native._inverse_rope_gptj_kernel, native.rocm_inverse_rope_rows_)
+
+    entries = _native_entries(native)
+    return all(callable(entry) for entry in entries) and (
+        (os.getpid(), device, *entries) in _qualified_inverse_rope
+        or supports_operator_contract(native, 'mla_bf16_inverse_rope'))
 
 
 if triton is not None:
@@ -46,12 +51,62 @@ if triton is not None:
         b = tl.load(Result + base + 448 + 2 * k + 1, count > 0, other=0.).to(tl.float32)
         cos = tl.load(CS + pos * 64 + k)
         sin = tl.load(CS + pos * 64 + 32 + k)
-        # Keep the source-pinned native expression and default fused arithmetic.
+        # Keep the native expression and default fused arithmetic.
         # Empty rows rotate positive BF16 zeros too, preserving signed zeros.
         even = a * cos + b * sin
         odd = b * cos - a * sin
         tl.store(Output + base + 448 + 2 * k, even.to(tl.bfloat16))
         tl.store(Output + base + 448 + 2 * k + 1, odd.to(tl.bfloat16))
+
+
+@torch.inference_mode()
+def qualify_inverse_rope(device):
+    """Check the installed inverse RoPE against fused BF16 writeback before capture."""
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as native
+
+    device = torch.device(device)
+    if triton is None or device.type != 'cuda':
+        return False
+    if device.index is None:
+        device = torch.device('cuda', torch.cuda.current_device())
+    if getattr(torch.cuda.get_device_properties(device), 'gcnArchName', '').split(':')[0] != 'gfx938':
+        return False
+    entries = _native_entries(native)
+    if not all(callable(entry) for entry in entries):
+        return False
+    if _native_matches(device):
+        return True
+    with torch.cuda.device(device):
+        if torch.cuda.is_current_stream_capturing():
+            return False
+        try:
+            angle = torch.arange(64 * 32, device=device, dtype=torch.float32).reshape(64, 32) / 61
+            cos_sin = torch.cat((angle.cos(), angle.sin()), dim=1)
+            for rows, heads in ((1, 64), (8, 128), (48, 64), (64, 128)):
+                # Include every BF16 encoding at the largest shape.
+                bits = torch.arange(rows * heads * 512, device=device, dtype=torch.int32)
+                result = bits.to(torch.int16).view(torch.bfloat16).reshape(rows, heads, 512)
+                output = torch.empty_like(result)
+                row = torch.arange(rows, device=device, dtype=torch.int32)
+                for with_extra in (False, True):
+                    main = row % 3 - 1
+                    extra = row % 2 if with_extra else None
+                    live = main > 0 if extra is None else main + extra > 0
+                    positions = (63 - row).to(torch.int64) if with_extra else 63 - row
+                    expected = torch.where(live[:, None, None], result, 0.)
+                    entries[1](expected, positions, cos_sin, 64)
+                    _mask_copy_inverse_rope[(rows, heads)](
+                        result, output, main, extra, positions, cos_sin,
+                        heads, with_extra, num_warps=4)
+                    if not torch.equal(output.view(torch.uint8), expected.view(torch.uint8)):
+                        _LOG.warning('HCU inverse RoPE preflight output differs from vLLM Core')
+                        return False
+        except (AttributeError, OSError, TypeError, ValueError, RuntimeError) as error:
+            _LOG.warning('HCU inverse RoPE preflight unavailable: %s', error)
+            return False
+    _qualified_inverse_rope.add((os.getpid(), device, *entries))
+    _LOG.info('HCU fused MLA inverse RoPE writeback admitted after native preflight')
+    return True
 
 
 def try_mask_copy_rope(result, output, main_lens, extra_lens, positions, cos_sin):
@@ -71,7 +126,7 @@ def try_mask_copy_rope(result, output, main_lens, extra_lens, positions, cos_sin
         return False
     if getattr(torch.cuda.get_device_properties(result.device), 'gcnArchName', '').split(':')[0] != 'gfx938':
         return False
-    if not _native_matches():
+    if not _native_matches(result.device):
         return False
     _mask_copy_inverse_rope[(result.shape[0], result.shape[1])](
         result, output, main_lens, extra_lens, positions, cos_sin,

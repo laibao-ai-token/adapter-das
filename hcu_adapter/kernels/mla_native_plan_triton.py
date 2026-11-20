@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Prototype fresh, source-pinned HCU sparse decode scheduling metadata."""
+"""Fresh HCU sparse decode scheduling metadata for qualified providers."""
 from __future__ import annotations
 
-import hashlib
-from pathlib import Path
+import logging
+import os
 
 import torch
+
+from hcu_adapter.operator_contracts import supports_operator_contract
 
 try:
     import triton
@@ -13,22 +15,27 @@ try:
 except ImportError:
     triton = None
 
-_INTERFACE_SHA = '8ea8f6205ec41b1cd0d42bd231156ed26751fa4862dab15b81e3ec11ff1fd5e4'
-_BINARY_SHA = '7ad05bfbb2fa67148b3e6bd6cf288f54ea1baa074438dc457d9d69b90bb92301'
-_contract = None
+_LOG = logging.getLogger('vllm.hcu_adapter')
+_qualified_plans = set()
 
 
-def _native_matches(provider, factory, metadata):
-    global _contract
+def _plan_key(native, device):
+    return (os.getpid(), device, native.flash_mla_with_kvcache,
+            native.get_mla_metadata, native.FlashMLASchedMeta,
+            native.flash_mla_cuda.sparse_decode_fwd)
+
+
+def _native_matches(provider, factory, metadata, device):
     from flash_mla import flash_mla_interface as native
-    current = (native.flash_mla_with_kvcache, native.get_mla_metadata,
-               native.FlashMLASchedMeta, native.flash_mla_cuda.sparse_decode_fwd)
-    if _contract is None:
-        good = (hashlib.sha256(Path(native.__file__).read_bytes()).hexdigest() == _INTERFACE_SHA
-                and hashlib.sha256(Path(native.flash_mla_cuda.__file__).read_bytes()).hexdigest() == _BINARY_SHA)
-        _contract = current if good else ()
-    return (_contract == current and provider is current[0]
-            and factory is current[1] and type(metadata) is current[2])
+
+    extension = getattr(native, 'flash_mla_cuda', None)
+    if (provider is not native.flash_mla_with_kvcache
+            or factory is not native.get_mla_metadata
+            or type(metadata) is not native.FlashMLASchedMeta
+            or not callable(getattr(extension, 'sparse_decode_fwd', None))):
+        return False
+    return (_plan_key(native, device) in _qualified_plans
+            or supports_operator_contract(extension, 'sparse_decode_plan_h64'))
 
 
 if triton is not None:
@@ -114,6 +121,94 @@ if triton is not None:
                 tl.store(Plan + part * 8 + field, value)
 
 
+@torch.inference_mode()
+def qualify_native_plan(device):
+    """Compare live provider plans and output before enabling external metadata."""
+    if triton is None:
+        return False
+    from flash_mla import flash_mla_interface as native
+
+    extension = getattr(native, 'flash_mla_cuda', None)
+    if not callable(getattr(extension, 'sparse_decode_fwd', None)):
+        _LOG.info('HCU FlashMLA plan preflight requires the native sparse decode entry')
+        return False
+    device = torch.device(device)
+    if device.type != 'cuda':
+        return False
+    if device.index is None:
+        device = torch.device('cuda', torch.cuda.current_device())
+    props = torch.cuda.get_device_properties(device)
+    if (getattr(props, 'gcnArchName', '').split(':')[0] != 'gfx938'
+            or props.multi_processor_count != 64):
+        return False
+    key = _plan_key(native, device)
+    if key in _qualified_plans:
+        return True
+
+    with torch.cuda.device(device):
+        if torch.cuda.is_current_stream_capturing():
+            return False
+        try:
+            values = torch.arange(256, device=device)
+            kv = ((values[:, None] % 17).float() / 17).expand(-1, 512).bfloat16().contiguous()
+            cos_sin = torch.zeros((256, 64), device=device)
+            cos_sin[:, :32] = 1
+            caches = {}
+            for block in (32, 64):
+                cache = torch.zeros((256 // block, block, 584), device=device, dtype=torch.uint8)
+                torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+                    kv, cache, values, values, cos_sin, block, None, False)
+                caches[block] = cache.unsqueeze(-2)
+            for rows in (1, 8, 48, 64):
+                q = torch.full((rows, 1, 64, 512), 0.25, device=device, dtype=torch.bfloat16)
+                row = torch.arange(rows, device=device, dtype=torch.int32)
+                for main_block, extra_block in ((32, 0), (64, 32), (32, 64)):
+                    main_width, extra_width = 128, 512 if extra_block else 0
+                    main_ids = (torch.arange(main_width, device=device, dtype=torch.int32)
+                                % 256).repeat(rows, 1, 1)
+                    extra_ids = ((torch.arange(extra_width, device=device, dtype=torch.int32)
+                                  % 256).repeat(rows, 1, 1) if extra_block else None)
+                    main = (row * 65) % (main_width + 1)
+                    extra = (row * 127 + 65) % (extra_width + 1) if extra_block else None
+                    args = dict(q=q, k_cache=caches[main_block], block_table=None,
+                                cache_seqlens=None, head_dim_v=512, softmax_scale=512**-.5,
+                                causal=False, is_fp8_kvcache=True, indices=main_ids,
+                                topk_length=main, extra_k_cache=caches.get(extra_block),
+                                extra_indices_in_kvcache=extra_ids, extra_topk_length=extra)
+                    oracle = native.get_mla_metadata()[0]
+                    expected, _ = native.flash_mla_with_kvcache(tile_scheduler_metadata=oracle, **args)
+                    plan = torch.empty((64, 8), device=device, dtype=torch.int32)
+                    splits = torch.empty((rows + 1,), device=device, dtype=torch.int32)
+                    _fresh_native_plan[(1,)](main, extra, plan, splits, rows, extra is not None, num_warps=1)
+                    op, osplits = oracle.tile_scheduler_metadata, oracle.num_splits
+                    if (not isinstance(op, torch.Tensor) or not isinstance(osplits, torch.Tensor)
+                            or op.shape != plan.shape or op.dtype != plan.dtype
+                            or osplits.shape != splits.shape or osplits.dtype != splits.dtype):
+                        _LOG.warning('HCU FlashMLA plan preflight found an incompatible metadata layout')
+                        return False
+                    active = op[:, 0] < rows
+                    if (not torch.equal(plan[:, 0], op[:, 0])
+                            or not torch.equal(plan[active, :7], op[active, :7])
+                            or not torch.equal(splits, osplits)):
+                        _LOG.warning('HCU FlashMLA plan preflight found different scheduling metadata')
+                        return False
+                    candidate = native.get_mla_metadata()[0]
+                    candidate.tile_scheduler_metadata, candidate.num_splits = plan, splits
+                    actual, _ = native.flash_mla_with_kvcache(tile_scheduler_metadata=candidate, **args)
+                    live = main > 0 if extra is None else main + extra > 0
+                    if not torch.equal(actual[live].contiguous().view(torch.uint8),
+                                       expected[live].contiguous().view(torch.uint8)):
+                        _LOG.warning('HCU FlashMLA plan preflight found different attention output')
+                        return False
+        except (AttributeError, TypeError, ValueError, torch.OutOfMemoryError) as error:
+            _LOG.warning('HCU FlashMLA plan preflight unavailable: %s', error)
+            return False
+
+    _qualified_plans.add(key)
+    _LOG.info('HCU FlashMLA external scheduling plan admitted after native preflight')
+    return True
+
+
 def prepare_native_plan(main, extra, native_heads, main_width, extra_width, provider, factory, cache_blocks):
     """Keep a fresh native object; fill supported plans from current counts."""
     metadata = factory()[0]
@@ -129,7 +224,8 @@ def prepare_native_plan(main, extra, native_heads, main_width, extra_width, prov
         return metadata
     props = torch.cuda.get_device_properties(main.device)
     if (getattr(props, 'gcnArchName', '').split(':')[0] != 'gfx938'
-            or props.multi_processor_count != 64 or not _native_matches(provider, factory, metadata)):
+            or props.multi_processor_count != 64
+            or not _native_matches(provider, factory, metadata, main.device)):
         return metadata
     plan = torch.empty((64, 8), device=main.device, dtype=torch.int32)
     splits = torch.empty((main.numel() + 1,), device=main.device, dtype=torch.int32)
