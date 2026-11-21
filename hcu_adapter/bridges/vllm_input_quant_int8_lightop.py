@@ -73,8 +73,9 @@ captures and inputs outside the LightOp contract.
 Known limits (validate in the service, do not treat as proven)
 --------------------------------------------------------------
 * The `ones(hidden)` smooth factor is cached by device, stream and hidden
-  width. The bridge uses upstream quantization during compilation and graph
-  capture. Each eligible stream initializes its own cached factor in order.
+  width. Compilation and default graph capture use the native op. With
+  HCU_LIGHTOP_PER_TOKEN_INT8_GRAPH=1, capture can use a warmed stream factor
+  or allocate a graph-local factor without publishing it into the eager cache.
 * Accelerator placement is an explicit gate (`_device_ok`): a CPU tensor falls
   back with reason `device` instead of reaching the HCU op and logging an
   exception fallback.
@@ -102,6 +103,7 @@ LOG = logging.getLogger("hcu.adapter")
 _TARGET = "vllm._custom_ops"
 _TARGET_SYMBOL = _TARGET + ".scaled_int8_quant"
 _ENV = "HCU_LIGHTOP_PER_TOKEN_INT8"
+_GRAPH_ENV = "HCU_LIGHTOP_PER_TOKEN_INT8_GRAPH"
 _MARKER = "_hcu_lightop_per_token_int8"
 _SIGNATURE = ("input", "scale", "azp", "symmetric")
 
@@ -192,8 +194,6 @@ def _device_ok(x) -> bool:
 def _execution_fallback(x):
     if torch.cuda.current_device() != x.device.index:
         return "device"
-    if torch.cuda.is_current_stream_capturing():
-        return "capture"
     return None
 
 
@@ -251,6 +251,8 @@ def _ineligible(x, scale, azp, symmetric):
 def _wrap(original):
     """Build the replacement around the captured upstream function."""
 
+    graph_enabled = os.getenv(_GRAPH_ENV) == "1"
+
     @functools.wraps(original)
     def scaled_int8_quant(input, scale=None, azp=None, symmetric=True):
         if torch.compiler.is_compiling():
@@ -258,6 +260,10 @@ def _wrap(original):
         reason = _ineligible(input, scale, azp, symmetric)
         if reason is None:
             reason = _execution_fallback(input)
+        capturing = (reason is None and input.is_cuda
+                     and torch.cuda.is_current_stream_capturing())
+        if capturing and not graph_enabled:
+            reason = "capture"
         if reason is not None:
             _bump(reason)
             _log_once(
@@ -274,12 +280,20 @@ def _wrap(original):
         try:
             hidden = int(input.shape[-1])
             tokens = int(input.numel() // hidden)
-            smooth = _smooth_scale(hidden, input.device)
+            if capturing:
+                stream = _current_stream_id(input.device)
+                smooth = _SMOOTH.get((input.device.index, stream, hidden))
+                if smooth is None:
+                    smooth = torch.ones(hidden, device=input.device, dtype=torch.float32)
+            else:
+                smooth = _smooth_scale(hidden, input.device)
             quantized = torch.empty_like(input, dtype=torch.int8)
             scales = torch.empty((tokens, 1), device=input.device,
                                  dtype=torch.float32)
             _lightop_op()(quantized, input, scales, smooth, False, -1.0)
-        except Exception:  # noqa: BLE001 - a vendor kernel must never break serving
+        except Exception:  # noqa: BLE001
+            if capturing:
+                raise
             _bump("exception")
             _log_once(
                 "fallback:exception", logging.WARNING,
@@ -288,6 +302,8 @@ def _wrap(original):
             )
             return original(input, scale, azp, symmetric)
 
+        if capturing:
+            _log_once("capture-hit", logging.INFO, "HCU LightOp per-token INT8 captured")
         if _bump("hit") == 1:
             LOG.info("HCU LightOp per-token INT8 first hit: %s", _counts_line())
         return quantized, scales, None

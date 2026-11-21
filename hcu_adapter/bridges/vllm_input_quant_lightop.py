@@ -47,7 +47,8 @@ immediately (so a silently misconfigured deployment is visible without waiting
 for shutdown) and a final `hit=... fallback=...` line is flushed at exit.
 
 Gate: on by default (`HCU_LIGHTOP_PER_TOKEN_FP8=1`). Set `=0` before startup
-for the upstream path. Compilation and graph capture use upstream quantization.
+for the upstream path. Compilation uses upstream quantization. Graph capture
+requires HCU_LIGHTOP_PER_TOKEN_FP8_GRAPH=1 because numerical parity is approximate.
 The diagnostic runs only on eligible calls outside capture.
 """
 
@@ -70,6 +71,7 @@ _TARGET_SYMBOL = _TARGET + ".QuantFP8.forward_cuda"
 _MARKER = "_hcu_lightop_per_token_fp8"
 _SIGNATURE = ("self", "x", "scale", "scale_ub", "use_triton")
 _AMAX_DIAG_ENV = "HCU_LIGHTOP_FP8_AMAX_DIAG"
+_GRAPH_ENV = "HCU_LIGHTOP_PER_TOKEN_FP8_GRAPH"
 
 _LOCK = threading.RLock()
 _COUNTS: dict[str, int] = {}
@@ -180,18 +182,23 @@ def _wrap(module, original):
     amax_floor = fp8_max * scale_floor
     diag = os.environ.get(_AMAX_DIAG_ENV, "") not in ("", "0")
 
+    graph_enabled = os.getenv(_GRAPH_ENV) == "1"
+
     @functools.wraps(original)
     def forward_cuda(self, x, scale=None, scale_ub=None, use_triton=False):
         if torch.compiler.is_compiling():
             return original(self, x, scale, scale_ub, use_triton)
         reason = _ineligible(self, x, scale, scale_ub, per_token)
+        capturing = False
         if reason is None:
             if not _device_ok(x):
                 reason = "device"
-            elif torch.cuda.is_current_stream_capturing():
-                reason = "capture"
             elif x.numel() == 0:
                 reason = "empty"
+            else:
+                capturing = torch.cuda.is_current_stream_capturing()
+                if capturing and not graph_enabled:
+                    reason = "capture"
         if reason is not None:
             _bump(reason)
             _log_once(
@@ -201,11 +208,13 @@ def _wrap(module, original):
             )
             return original(self, x, scale, scale_ub, use_triton)
 
-        if diag:
+        if diag and not capturing:
             _diag_rows(x, scale_floor, amax_floor)
         try:
             quantized, scales = _lightop_fn()(x, dtype=fp8_dtype)
-        except Exception:  # noqa: BLE001 - a vendor kernel must never break serving
+        except Exception:  # noqa: BLE001
+            if capturing:
+                raise
             _bump("exception")
             _log_once(
                 "fallback:exception", logging.WARNING,
@@ -214,6 +223,8 @@ def _wrap(module, original):
             )
             return original(self, x, scale, scale_ub, use_triton)
 
+        if capturing:
+            _log_once("capture-hit", logging.INFO, "HCU LightOp per-token FP8 captured")
         _bump("hit")
         _log_once(
             "hit", logging.INFO,

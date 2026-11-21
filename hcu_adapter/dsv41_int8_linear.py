@@ -227,6 +227,11 @@ class HcuDSV41Int8LinearMethod(CompressedTensorsLinearMethod):
             _metadata_tensor(bias, weight, ((n,),), x.dtype, "bias")
         return torch.empty((*shape[:-1], n), dtype=x.dtype, device=x.device)
 
+    # WQ-B can consume the native dynamic INT8 pair directly. The scoped
+    # RMS handoff applies only to K=5120, and leaves WQ-B (K=1280) native.
+    _hcu_wq_b_int8_apply_v1 = apply
+    _hcu_wq_b_int8_finalize_v1 = process_weights_after_loading
+
     @staticmethod
     def _paired_input_supported(layer, x, bias):
         witness = getattr(layer, '_hcu_int8_empty_witness', None)
